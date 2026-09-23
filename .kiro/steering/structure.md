@@ -23,6 +23,11 @@ Library-first / thin binary。ドメインは `lib`、起動面は `main`（将�
 **Location**: `.github/workflows/ci.yml`  
 **Purpose**: Linux / Windows の検証と release 成果物
 
+### Runtime ML resources
+**Location**: `resources/models/`  
+**Purpose**: 推論用重みなど実行時リソース（大きなバイナリは gitignore）  
+**Example**: `phase2_internal_finetuned_eventstrong_noise_20s10s_rev1.weights.h5`
+
 ## Naming Conventions
 
 - **Files / modules**: snake_case

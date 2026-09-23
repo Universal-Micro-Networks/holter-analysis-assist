@@ -20,3 +20,12 @@ target
 .vscode/
 *.swp
 .DS_Store
+
+# ML model weights (large binaries; kept as local/deploy resources)
+resources/models/**
+!resources/models/README.md
+*.h5
+*.onnx
+*.pt
+*.pth
+*.safetensors

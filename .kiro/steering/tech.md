@@ -50,6 +50,7 @@ cargo run -- classify <INPUT> [--format text|json]
 
 - ホスト全体への rustup 必須にせず、必要なら `$PWD/.cargo-tools` / `.rustup-tools` を利用可（gitignore 済み）
 - モデル形式・ECG ファイルフォーマットは未確定 → 仕様フェーズ（`/kiro-discovery`）で確定する
+- 推論重みは `resources/models/` に置き、Git には含めない（配布は別経路）
 
 ---
 _Document standards and patterns, not every dependency_

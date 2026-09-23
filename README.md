@@ -27,6 +27,14 @@ cargo run -- classify path/to/ecg.bin
 cargo run -- classify path/to/ecg.bin --format json
 ```
 
+## モデルリソース
+
+推論用重みは `resources/models/` に配置します（Git 管理外）。
+
+```text
+resources/models/phase2_internal_finetuned_eventstrong_noise_20s10s_rev1.weights.h5
+```
+
 ## CI
 
 GitHub Actions（`.github/workflows/ci.yml`）で Linux / Windows の  
