@@ -1,7 +1,7 @@
 {
-  "weights": "resources/models/phase2_internal_finetuned_eventstrong_noise_20s10s_rev1.weights.h5",
+  "weights": "C:\\Users\\tadas\\Downloads\\phase2_internal_finetuned_eventstrong_noise_20s10s_rev1.weights.h5",
   "weights_sha256": "45f34ddc60cea66e03420a99484fec11a7ba625a551dabab492bebadfd61c83f",
-  "onnx": "resources/models/phase2_rev1.onnx",
+  "onnx": "resources\\models\\phase2_rev1.onnx",
   "opset": 17,
   "input": {
     "name": "ecg",

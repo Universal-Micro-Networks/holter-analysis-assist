@@ -143,7 +143,7 @@ def export_onnx(
     spec = (tf.TensorSpec(input_shape, tf.float32, name=INPUT_NAME),)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Converting to ONNX (opset={opset}) → {output}")
+    print(f"Converting to ONNX (opset={opset}) -> {output}")
     tf2onnx.convert.from_keras(
         export_model,
         input_signature=spec,

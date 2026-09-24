@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   cargo run --release --example bench_infer -- \
-//!     resources/models/phase2_rev1.onnx /path/to/windows cpu|coreml [warmup]
+//!     resources/models/phase2_rev1.onnx /path/to/windows auto|cpu|cuda|coreml [warmup]
 use holter_analysis_assist::phase2::{ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
 use std::env;
 use std::fs;
@@ -14,8 +14,8 @@ fn main() {
     let mut args = env::args().skip(1);
     let onnx = PathBuf::from(args.next().expect("onnx path"));
     let win_dir = PathBuf::from(args.next().expect("window dir"));
-    let provider = ExecutionProviderKind::from_str(
-        &args.next().unwrap_or_else(|| "cpu".into()),
+    let requested = ExecutionProviderKind::from_str(
+        &args.next().unwrap_or_else(|| "auto".into()),
     )
     .expect("provider");
     let warmup: usize = args
@@ -32,52 +32,74 @@ fn main() {
         .collect();
     files.sort();
 
-    eprintln!("loading model with provider={provider} ...");
+    eprintln!("loading model with requested_provider={requested} ...");
     let load_t0 = Instant::now();
-    let mut model = Phase2Model::load_with_provider(&onnx, provider).expect("load onnx");
+    let mut model = Phase2Model::load_with_provider(&onnx, requested).expect("load onnx");
+    let provider = model.provider();
     let load_ms = load_t0.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("model loaded in {load_ms:.1} ms");
+    eprintln!("model loaded in {load_ms:.1} ms (resolved_provider={provider})");
 
-    let mut windows = Vec::new();
-    for f in &files {
-        let bytes = fs::read(f).unwrap();
-        assert_eq!(bytes.len(), WINDOW_SAMPLES * 4);
-        let mut v = Vec::with_capacity(WINDOW_SAMPLES);
-        for c in bytes.chunks_exact(4) {
-            v.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+    let mut times_ms = Vec::with_capacity(files.len());
+    for (i, path) in files.iter().enumerate() {
+        let bytes = fs::read(path).expect("read window");
+        assert_eq!(
+            bytes.len(),
+            WINDOW_SAMPLES * 4,
+            "window {} byte length",
+            path.display()
+        );
+        let mut samples = vec![0.0_f32; WINDOW_SAMPLES];
+        for (j, chunk) in bytes.chunks_exact(4).enumerate() {
+            samples[j] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
-        windows.push(v);
-    }
 
-    for w in windows.iter().take(warmup) {
-        let _ = model.infer_window(w).unwrap();
-    }
+        if i < warmup {
+            let _ = model.infer_window(&samples).expect("warmup infer");
+            continue;
+        }
 
-    let mut times_ms = Vec::with_capacity(windows.len());
-    for w in &windows {
         let t0 = Instant::now();
-        let _ = model.infer_window(w).unwrap();
+        let _ = model.infer_window(&samples).expect("infer");
         times_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
 
-    let n = times_ms.len() as f64;
-    let mean = times_ms.iter().sum::<f64>() / n;
+    let n = times_ms.len();
+    let mean = if n == 0 {
+        0.0
+    } else {
+        times_ms.iter().sum::<f64>() / n as f64
+    };
     let mut sorted = times_ms.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = sorted[sorted.len() / 2];
-    let p95_idx = ((sorted.len() as f64) * 0.95) as usize;
-    let p95 = sorted[p95_idx.min(sorted.len() - 1)];
+    let median = if n == 0 {
+        0.0
+    } else if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    };
+    let p95 = if n == 0 {
+        0.0
+    } else {
+        sorted[((n as f64 - 1.0) * 0.95).round() as usize]
+    };
+    let min = sorted.first().copied().unwrap_or(0.0);
+    let max = sorted.last().copied().unwrap_or(0.0);
+    let total_s = times_ms.iter().sum::<f64>() / 1000.0;
+    let throughput = if mean > 0.0 { 1000.0 / mean } else { 0.0 };
+
     println!(
-        "{{ \"backend\": \"ort_rust\", \"provider\": \"{}\", \"load_ms\": {:.6}, \"n\": {}, \"mean_ms\": {:.6}, \"median_ms\": {:.6}, \"p95_ms\": {:.6}, \"min_ms\": {:.6}, \"max_ms\": {:.6}, \"total_s\": {:.6}, \"throughput_windows_per_s\": {:.6} }}",
+        "{{ \"backend\": \"ort_rust\", \"requested_provider\": \"{}\", \"provider\": \"{}\", \"load_ms\": {:.6}, \"n\": {}, \"mean_ms\": {:.6}, \"median_ms\": {:.6}, \"p95_ms\": {:.6}, \"min_ms\": {:.6}, \"max_ms\": {:.6}, \"total_s\": {:.6}, \"throughput_windows_per_s\": {:.6} }}",
+        requested.as_str(),
         provider.as_str(),
         load_ms,
-        times_ms.len(),
+        n,
         mean,
         median,
         p95,
-        sorted[0],
-        sorted[sorted.len() - 1],
-        times_ms.iter().sum::<f64>() / 1000.0,
-        1000.0 / mean
+        min,
+        max,
+        total_s,
+        throughput
     );
 }

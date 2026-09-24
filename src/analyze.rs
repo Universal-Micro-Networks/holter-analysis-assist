@@ -54,7 +54,7 @@ pub fn analyze_ecl(
     onnx_path: &Path,
     output_csv: &Path,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
-    analyze_ecl_with_limit(ecl_path, onnx_path, output_csv, None, ExecutionProviderKind::Cpu)
+    analyze_ecl_with_limit(ecl_path, onnx_path, output_csv, None, ExecutionProviderKind::Auto)
 }
 
 pub fn analyze_ecl_with_limit(
@@ -75,11 +75,12 @@ pub fn analyze_ecl_with_limit(
     }
 
     eprintln!(
-        "[2/6] ONNX inference: windows={} provider={}",
+        "[2/6] ONNX inference: windows={} requested_provider={}",
         starts.len(),
         provider
     );
     let mut model = Phase2Model::load_with_provider(onnx_path, provider)?;
+    eprintln!("[2/6] using execution provider={}", model.provider());
     let mut all_candidates = Vec::new();
     let mut rhythm_windows = Vec::new();
 

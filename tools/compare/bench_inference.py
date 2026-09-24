@@ -121,10 +121,15 @@ def bench_keras(weights: Path, windows: list[np.ndarray], warmup: int) -> dict:
     return {"backend": "keras_tensorflow", "weights_sha256": sha, **summarize(times)}
 
 
-def bench_ort_python(onnx: Path, windows: list[np.ndarray], warmup: int) -> dict:
+def bench_ort_python(
+    onnx: Path, windows: list[np.ndarray], warmup: int, providers: list[str] | None = None
+) -> dict:
     import onnxruntime as ort
 
-    sess = ort.InferenceSession(str(onnx), providers=["CPUExecutionProvider"])
+    if providers is None:
+        providers = ["CPUExecutionProvider"]
+    sess = ort.InferenceSession(str(onnx), providers=providers)
+    active = sess.get_providers()
     name = sess.get_inputs()[0].name
     for w in windows[:warmup]:
         sess.run(None, {name: w})
@@ -134,7 +139,11 @@ def bench_ort_python(onnx: Path, windows: list[np.ndarray], warmup: int) -> dict
         t0 = time.perf_counter()
         sess.run(None, {name: w})
         times.append((time.perf_counter() - t0) * 1000.0)
-    return {"backend": "onnxruntime_python", **summarize(times)}
+    return {
+        "backend": "onnxruntime_python",
+        "providers": active,
+        **summarize(times),
+    }
 
 
 def bench_rust_ort(onnx: Path, windows: list[np.ndarray], warmup: int, provider: str) -> dict:
@@ -149,7 +158,14 @@ def bench_rust_ort(onnx: Path, windows: list[np.ndarray], warmup: int, provider:
         env["CARGO_HOME"] = str(REPO / ".cargo-tools")
         env["RUSTUP_HOME"] = str(REPO / ".rustup-tools")
         cargo_bin = str(REPO / ".cargo-tools" / "bin")
-        env["PATH"] = cargo_bin + os.pathsep + env.get("PATH", "")
+        user_cargo = os.path.expanduser("~/.cargo/bin")
+        env["PATH"] = (
+            cargo_bin
+            + os.pathsep
+            + user_cargo
+            + os.pathsep
+            + env.get("PATH", "")
+        )
         env["CARGO_TARGET_DIR"] = str(REPO / "target")
 
         cmd = [
@@ -205,6 +221,14 @@ def main() -> int:
     ort_rs_cpu = bench_rust_ort(args.onnx, windows, args.warmup, "cpu")
     print(json.dumps(ort_rs_cpu, indent=2))
 
+    ort_rs_cuda = None
+    print("Benchmark Rust ort (CUDA) ...")
+    try:
+        ort_rs_cuda = bench_rust_ort(args.onnx, windows, args.warmup, "cuda")
+        print(json.dumps(ort_rs_cuda, indent=2))
+    except Exception as e:
+        print(f"CUDA bench failed: {e}")
+
     ort_rs_coreml = None
     if sys.platform == "darwin":
         print("Benchmark Rust ort (CoreML) ...")
@@ -227,11 +251,14 @@ def main() -> int:
         "keras": keras,
         "onnxruntime_python": ort_py,
         "ort_rust_cpu": ort_rs_cpu,
+        "ort_rust_cuda": ort_rs_cuda,
         "ort_rust_coreml": ort_rs_coreml,
         "speedup_mean": {
             "keras_over_ort_python": speedup(keras, ort_py),
             "keras_over_ort_rust_cpu": speedup(keras, ort_rs_cpu),
+            "keras_over_ort_rust_cuda": speedup(keras, ort_rs_cuda),
             "keras_over_ort_rust_coreml": speedup(keras, ort_rs_coreml),
+            "ort_rust_cpu_over_cuda": speedup(ort_rs_cpu, ort_rs_cuda),
             "ort_rust_cpu_over_coreml": speedup(ort_rs_cpu, ort_rs_coreml),
         },
     }

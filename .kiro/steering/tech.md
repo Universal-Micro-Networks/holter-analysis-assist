@@ -10,7 +10,7 @@
 
 - **Language**: Rust (edition 2021, MSRV 1.74+)
 - **CLI**: clap (derive)
-- **ONNX inference**: ort `=2.0.0-rc.13` (+ ndarray)
+- **ONNX inference**: ort `=2.0.0-rc.13` (+ ndarray); EP features `cuda` / `coreml` (default on) with runtime `--provider auto|cuda|coreml|cpu`
 - **Serialization**: serde / serde_json
 - **Errors**: thiserror
 - **Export tooling**: Python TensorFlow + tf2onnx (`tools/export/`)

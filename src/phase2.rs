@@ -145,9 +145,13 @@ pub enum InferError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutionProviderKind {
-    /// Default CPU EP.
+    /// Prefer CUDA → CoreML → CPU (compiled / platform availability).
     #[default]
+    Auto,
+    /// Explicit CPU EP.
     Cpu,
+    /// NVIDIA CUDA EP (requires `cuda` feature + CUDA Toolkit / cuDNN at runtime).
+    Cuda,
     /// Apple CoreML (GPU / Neural Engine / CPU via Apple ML stack). macOS/iOS only.
     Coreml,
 }
@@ -155,9 +159,16 @@ pub enum ExecutionProviderKind {
 impl ExecutionProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
             Self::Coreml => "coreml",
         }
+    }
+
+    /// Providers to try for `auto`, in priority order.
+    pub fn auto_candidates() -> &'static [ExecutionProviderKind] {
+        &[Self::Cuda, Self::Coreml, Self::Cpu]
     }
 }
 
@@ -171,9 +182,13 @@ impl std::str::FromStr for ExecutionProviderKind {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
             "cpu" => Ok(Self::Cpu),
+            "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
             "coreml" | "core-ml" => Ok(Self::Coreml),
-            other => Err(format!("unknown execution provider '{other}' (expected cpu|coreml)")),
+            other => Err(format!(
+                "unknown execution provider '{other}' (expected auto|cpu|cuda|coreml)"
+            )),
         }
     }
 }
@@ -182,32 +197,89 @@ impl std::str::FromStr for ExecutionProviderKind {
 pub struct Phase2Model {
     session: Session,
     model_path: PathBuf,
+    /// Provider that was actually used to build the session (never `Auto`).
     provider: ExecutionProviderKind,
 }
 
 impl Phase2Model {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, InferError> {
-        Self::load_with_provider(path, ExecutionProviderKind::Cpu)
+        Self::load_with_provider(path, ExecutionProviderKind::Auto)
     }
 
     pub fn load_with_provider(
         path: impl AsRef<Path>,
         provider: ExecutionProviderKind,
     ) -> Result<Self, InferError> {
+        // `cargo run --example` places the exe under `target/*/examples/`, while
+        // ort's copy-dylibs drops EP DLLs in `target/*/`. Ensure that parent dir
+        // is searchable before the CUDA provider library is loaded.
+        ensure_ort_dylib_search_path();
+
         let path = path.as_ref();
         if !path.exists() {
             return Err(InferError::ModelNotFound(path.display().to_string()));
         }
 
+        match provider {
+            ExecutionProviderKind::Auto => {
+                let mut last_err: Option<InferError> = None;
+                for candidate in ExecutionProviderKind::auto_candidates() {
+                    match Self::load_resolved(path, *candidate) {
+                        Ok(model) => return Ok(model),
+                        Err(err) => {
+                            eprintln!(
+                                "provider {candidate} unavailable ({err}); trying next ..."
+                            );
+                            last_err = Some(err);
+                        }
+                    }
+                }
+                Err(last_err.unwrap_or_else(|| {
+                    InferError::ProviderUnavailable("auto".into())
+                }))
+            }
+            other => Self::load_resolved(path, other),
+        }
+    }
+
+    fn load_resolved(
+        path: &Path,
+        provider: ExecutionProviderKind,
+    ) -> Result<Self, InferError> {
+        debug_assert_ne!(provider, ExecutionProviderKind::Auto);
+
         let mut builder = Session::builder()?
             .with_no_environment_execution_providers()
             .map_err(ort::Error::<()>::from)?;
+
         match provider {
+            ExecutionProviderKind::Auto => unreachable!("resolved providers only"),
             ExecutionProviderKind::Cpu => {
                 // Explicit CPU-only session (no env EPs).
             }
+            ExecutionProviderKind::Cuda => {
+                #[cfg(feature = "cuda")]
+                {
+                    use ort::ep;
+
+                    // Fail hard so `auto` / explicit `cuda` do not silently run on CPU.
+                    let cuda = ep::CUDA::default().build().error_on_failure();
+                    builder = builder
+                        .with_execution_providers([cuda])
+                        .map_err(ort::Error::<()>::from)?;
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    return Err(InferError::ProviderUnavailable(
+                        "cuda (build with --features cuda)".into(),
+                    ));
+                }
+            }
             ExecutionProviderKind::Coreml => {
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                #[cfg(all(
+                    feature = "coreml",
+                    any(target_os = "macos", target_os = "ios")
+                ))]
                 {
                     use ort::ep::{self, coreml::ComputeUnits, coreml::ModelFormat};
 
@@ -227,12 +299,16 @@ impl Phase2Model {
                             ep::coreml::SpecializationStrategy::FastPrediction,
                         )
                         .with_model_cache_dir(cache_dir.display().to_string())
-                        .build();
+                        .build()
+                        .error_on_failure();
                     builder = builder
                         .with_execution_providers([coreml])
                         .map_err(ort::Error::<()>::from)?;
                 }
-                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+                #[cfg(not(all(
+                    feature = "coreml",
+                    any(target_os = "macos", target_os = "ios")
+                )))]
                 {
                     return Err(InferError::ProviderUnavailable("coreml".into()));
                 }
@@ -297,6 +373,63 @@ fn extract_named_1d(
     Ok(data)
 }
 
+/// Ensure ort EP shared libraries are loadable when the binary lives under
+/// `target/{profile}/examples/` (ort copy-dylibs only fills `target/{profile}/`).
+fn ensure_ort_dylib_search_path() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return;
+    };
+    let Some(profile_dir) = exe_dir.parent() else {
+        return;
+    };
+
+    #[cfg(windows)]
+    {
+        const DYLIBS: &[&str] = &[
+            "onnxruntime.dll",
+            "onnxruntime_providers_shared.dll",
+            "onnxruntime_providers_cuda.dll",
+            "onnxruntime_providers_tensorrt.dll",
+            "onnxruntime_providers_nv_tensorrt_rtx.dll",
+        ];
+        for name in DYLIBS {
+            let dest = exe_dir.join(name);
+            if dest.exists() {
+                continue;
+            }
+            let src = profile_dir.join(name);
+            if src.exists() {
+                let _ = std::fs::copy(&src, &dest);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let key = if cfg!(target_os = "macos") {
+                "DYLD_LIBRARY_PATH"
+            } else {
+                "LD_LIBRARY_PATH"
+            };
+            let mut path = std::env::var_os(key).unwrap_or_default();
+            for dir in [exe_dir, profile_dir] {
+                let mut entry = dir.as_os_str().to_os_string();
+                entry.push(":");
+                entry.push(&path);
+                path = entry;
+            }
+            // SAFETY: called once before ORT loads provider libs.
+            unsafe { std::env::set_var(key, path) };
+        });
+    }
+}
+
 fn extract_named_flat(
     outputs: &ort::session::SessionOutputs<'_>,
     name: &'static str,
@@ -341,6 +474,26 @@ mod tests {
     fn rhythm_threshold() {
         assert_eq!(RhythmClass::from_score(0.84), RhythmClass::Sr);
         assert_eq!(RhythmClass::from_score(0.85), RhythmClass::AfAfl);
+    }
+
+    #[test]
+    fn provider_from_str_accepts_auto_cuda() {
+        assert_eq!(
+            "auto".parse::<ExecutionProviderKind>().unwrap(),
+            ExecutionProviderKind::Auto
+        );
+        assert_eq!(
+            "cuda".parse::<ExecutionProviderKind>().unwrap(),
+            ExecutionProviderKind::Cuda
+        );
+        assert_eq!(
+            ExecutionProviderKind::auto_candidates(),
+            &[
+                ExecutionProviderKind::Cuda,
+                ExecutionProviderKind::Coreml,
+                ExecutionProviderKind::Cpu
+            ]
+        );
     }
 
     #[test]

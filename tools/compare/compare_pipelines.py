@@ -58,6 +58,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to release binary; otherwise cargo run --release",
     )
+    p.add_argument(
+        "--provider",
+        default="cpu",
+        choices=["auto", "cpu", "cuda", "coreml"],
+        help="Rust ONNX execution provider",
+    )
     return p.parse_args()
 
 
@@ -245,7 +251,14 @@ def python_limited_analyze(
     }
 
 
-def run_rust(ecl: Path, onnx: Path, out_csv: Path, max_windows: int, rust_bin: Path | None) -> None:
+def run_rust(
+    ecl: Path,
+    onnx: Path,
+    out_csv: Path,
+    max_windows: int,
+    rust_bin: Path | None,
+    provider: str = "cpu",
+) -> None:
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     if rust_bin is not None:
         cmd = [
@@ -258,6 +271,8 @@ def run_rust(ecl: Path, onnx: Path, out_csv: Path, max_windows: int, rust_bin: P
             str(out_csv),
             "--max-windows",
             str(max_windows),
+            "--provider",
+            provider,
         ]
     else:
         cmd = [
@@ -273,13 +288,22 @@ def run_rust(ecl: Path, onnx: Path, out_csv: Path, max_windows: int, rust_bin: P
             str(out_csv),
             "--max-windows",
             str(max_windows),
+            "--provider",
+            provider,
         ]
     env = dict(os.environ)
     env["CARGO_HOME"] = str(REPO / ".cargo-tools")
     env["RUSTUP_HOME"] = str(REPO / ".rustup-tools")
-    # Ensure cargo is on PATH from project toolchain
     cargo_bin = str(REPO / ".cargo-tools" / "bin")
-    env["PATH"] = cargo_bin + os.pathsep + env.get("PATH", "")
+    user_cargo = str(Path.home() / ".cargo" / "bin")
+    env["PATH"] = (
+        cargo_bin
+        + os.pathsep
+        + user_cargo
+        + os.pathsep
+        + env.get("PATH", "")
+    )
+    env["CARGO_TARGET_DIR"] = str(REPO / "target")
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, cwd=REPO, check=True, env=env)
 
@@ -370,7 +394,14 @@ def main() -> int:
     print("=" * 72)
     print("2) Rust analyze-ecl")
     print("=" * 72)
-    run_rust(args.ecl, args.onnx, rs_csv, args.max_windows, args.rust_bin)
+    run_rust(
+        args.ecl,
+        args.onnx,
+        rs_csv,
+        args.max_windows,
+        args.rust_bin,
+        provider=args.provider,
+    )
 
     py_df = pd.read_csv(py_csv)
     rs_df = pd.read_csv(rs_csv)

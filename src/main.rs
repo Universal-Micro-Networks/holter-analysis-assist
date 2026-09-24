@@ -48,8 +48,8 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
 
-        /// ONNX Runtime execution provider (`cpu` or `coreml` on Apple).
-        #[arg(long, value_enum, default_value_t = ProviderArg::Cpu)]
+        /// ONNX Runtime EP: `auto` (CUDA→CoreML→CPU), `cuda`, `coreml`, or `cpu`.
+        #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
         provider: ProviderArg,
     },
 
@@ -71,8 +71,8 @@ enum Commands {
         #[arg(long)]
         max_windows: Option<usize>,
 
-        /// ONNX Runtime execution provider (`cpu` or `coreml` on Apple).
-        #[arg(long, value_enum, default_value_t = ProviderArg::Cpu)]
+        /// ONNX Runtime EP: `auto` (CUDA→CoreML→CPU), `cuda`, `coreml`, or `cpu`.
+        #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
         provider: ProviderArg,
     },
 }
@@ -86,14 +86,18 @@ enum OutputFormat {
 #[derive(Clone, Copy, Debug, ValueEnum, Default)]
 enum ProviderArg {
     #[default]
+    Auto,
     Cpu,
+    Cuda,
     Coreml,
 }
 
 impl From<ProviderArg> for ExecutionProviderKind {
     fn from(value: ProviderArg) -> Self {
         match value {
+            ProviderArg::Auto => Self::Auto,
             ProviderArg::Cpu => Self::Cpu,
+            ProviderArg::Cuda => Self::Cuda,
             ProviderArg::Coreml => Self::Coreml,
         }
     }
@@ -192,6 +196,7 @@ fn run_infer_window(
     }
 
     let mut model = Phase2Model::load_with_provider(&model_path, provider)?;
+    let resolved = model.provider();
     let out = model.infer_window(&samples)?;
 
     let beat_mean = out.beat.iter().sum::<f32>() / out.beat.len() as f32;
@@ -204,7 +209,7 @@ fn run_infer_window(
     let n = out.event.len() as f32;
     let report = InferWindowReport {
         model: model_path.display().to_string(),
-        provider: provider.as_str().to_string(),
+        provider: resolved.as_str().to_string(),
         rhythm_score: out.rhythm,
         rhythm_class: out.rhythm_class().as_str().to_string(),
         summary_beat_class: out.summary_beat_class().as_str().to_string(),

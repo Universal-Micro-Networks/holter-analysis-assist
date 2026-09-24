@@ -7,12 +7,20 @@ license = "MIT"
 readme = "README.md"
 rust-version = "1.74"
 
+[features]
+default = ["cuda", "coreml"]
+# ONNX Runtime CUDA EP (NVIDIA GPU). Needs CUDA Toolkit ≥13.2 + cuDNN on PATH at runtime.
+cuda = ["ort/cuda"]
+# ONNX Runtime CoreML EP (Apple GPU / Neural Engine). Effective on macOS/iOS only.
+coreml = ["ort/coreml"]
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std"] }
 clap = { version = "4.5", features = ["derive"] }
 csv = "1.3"
 ndarray = "0.17"
-ort = { version = "=2.0.0-rc.13", default-features = true, features = ["coreml"] }
+# lax-feature-matching: allow cuda+coreml without an exact multi-EP prebuilt binary.
+ort = { version = "=2.0.0-rc.13", default-features = true, features = ["lax-feature-matching"] }
 regex = "1.11"
 rustfft = "6.2"
 serde = { version = "1.0", features = ["derive"] }
