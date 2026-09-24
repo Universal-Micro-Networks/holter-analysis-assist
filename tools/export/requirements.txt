@@ -1,0 +1,7 @@
+# BeatSense ONNX export dependencies
+# Pin loosely; prefer matching Colab/TF 2.20 when available.
+numpy>=1.26
+tensorflow>=2.16
+tf2onnx>=1.16
+onnx>=1.16
+onnxruntime>=1.18

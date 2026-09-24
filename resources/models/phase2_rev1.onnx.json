@@ -1,0 +1,56 @@
+{
+  "weights": "resources/models/phase2_internal_finetuned_eventstrong_noise_20s10s_rev1.weights.h5",
+  "weights_sha256": "45f34ddc60cea66e03420a99484fec11a7ba625a551dabab492bebadfd61c83f",
+  "onnx": "resources/models/phase2_rev1.onnx",
+  "opset": 17,
+  "input": {
+    "name": "ecg",
+    "shape": [
+      1,
+      10000,
+      1
+    ],
+    "dtype": "float32",
+    "layout": "NTC"
+  },
+  "outputs": [
+    {
+      "name": "beat",
+      "shape": [
+        1,
+        10000,
+        1
+      ],
+      "activation": "sigmoid"
+    },
+    {
+      "name": "event",
+      "shape": [
+        1,
+        10000,
+        3
+      ],
+      "activation": "sigmoid",
+      "channels": [
+        "PAC",
+        "PVC",
+        "N"
+      ]
+    },
+    {
+      "name": "rhythm",
+      "shape": [
+        1,
+        1
+      ],
+      "activation": "sigmoid",
+      "negative": "SR",
+      "positive": "AF/AFL"
+    }
+  ],
+  "inference_output_names": [
+    "beat",
+    "event",
+    "rhythm"
+  ]
+}

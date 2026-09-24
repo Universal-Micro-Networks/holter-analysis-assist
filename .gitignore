@@ -21,11 +21,16 @@ target
 *.swp
 .DS_Store
 
-# ML model weights (large binaries; kept as local/deploy resources)
+# ML model weights / ONNX binaries (kept as local/deploy resources)
 resources/models/**
 !resources/models/README.md
+!resources/models/*.onnx.json
 *.h5
 *.onnx
 *.pt
 *.pth
 *.safetensors
+
+# Local Python export / tooling venvs
+.venv-export/
+.venv/

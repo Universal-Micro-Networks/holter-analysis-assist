@@ -29,10 +29,20 @@ cargo run -- classify path/to/ecg.bin --format json
 
 ## モデルリソース
 
-推論用重みは `resources/models/` に配置します（Git 管理外）。
+推論用重み / ONNX は `resources/models/` に配置します（バイナリは Git 管理外）。
 
 ```text
 resources/models/phase2_internal_finetuned_eventstrong_noise_20s10s_rev1.weights.h5
+resources/models/phase2_rev1.onnx          # tools/export/export_onnx.py で生成
+resources/models/phase2_rev1.onnx.json     # 入出力契約（Git 管理）
+```
+
+ONNX 生成:
+
+```bash
+python3 -m venv .venv-export && source .venv-export/bin/activate
+pip install -r tools/export/requirements.txt
+PYTHONPATH=tools python tools/export/export_onnx.py
 ```
 
 ## CI
