@@ -29,6 +29,9 @@ cargo run -- classify path/to/ecg.bin --format json
 # Phase-2 ONNX reference（20s @ 500Hz window）
 cargo run -- infer-window --model resources/models/phase2_rev1.onnx --format json
 
+# Apple Silicon: CoreML（GPU / Neural Engine）
+cargo run --release -- infer-window --provider coreml --format json
+
 # Full ECL pipeline（preprocess → ONNX → overlap postprocess → CSV）
 cargo run --release -- analyze-ecl resources/samples/sample.ecl \
   --model resources/models/phase2_rev1.onnx \
@@ -39,6 +42,22 @@ cargo run --release -- analyze-ecl resources/samples/sample.ecl --max-windows 5
 ```
 
 `infer-window` は前処理済み float32 LE 窓（40,000 bytes = 10,000 samples）を `--input` で渡せます。省略時は合成サイン波でスモークします。
+
+### Apple Silicon（CoreML）
+
+`--provider coreml` で ONNX Runtime の CoreML EP（GPU / Neural Engine）を使えます。
+
+- モデル形式は **NeuralNetwork**（`MLProgram` はこのモデルの AvgPool1D でコンパイル失敗するため）
+- 初回ロードは CoreML コンパイルで数十秒かかることがあります（`resources/models/.coreml-cache/` にキャッシュ）
+- この Phase-2 モデルでは CPU 比の推論高速化は限定的（~1.05x 程度）。ロードコストが大きいので短時間ジョブでは CPU の方が速いことがあります
+
+CPU vs CoreML ベンチ（推論のみ）:
+
+```bash
+source .venv-export/bin/activate
+PYTHONPATH=tools python tools/compare/bench_inference.py --max-windows 50
+```
+
 ## モデルリソース
 
 推論用重み / ONNX は `resources/models/` に配置します（バイナリは Git 管理外）。

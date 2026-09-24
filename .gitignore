@@ -33,6 +33,7 @@ resources/models/**
 
 # Local samples / goldens (optional; not required in git)
 resources/samples/
+resources/models/.coreml-cache/
 output/
 
 __pycache__/

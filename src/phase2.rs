@@ -137,29 +137,122 @@ pub enum InferError {
     MissingOutput(&'static str),
     #[error("unexpected output shape for {name}: {detail}")]
     BadShape { name: &'static str, detail: String },
+    #[error("execution provider '{0}' is not available on this platform")]
+    ProviderUnavailable(String),
+}
+
+/// ONNX Runtime execution provider selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionProviderKind {
+    /// Default CPU EP.
+    #[default]
+    Cpu,
+    /// Apple CoreML (GPU / Neural Engine / CPU via Apple ML stack). macOS/iOS only.
+    Coreml,
+}
+
+impl ExecutionProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Coreml => "coreml",
+        }
+    }
+}
+
+impl std::fmt::Display for ExecutionProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ExecutionProviderKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "cpu" => Ok(Self::Cpu),
+            "coreml" | "core-ml" => Ok(Self::Coreml),
+            other => Err(format!("unknown execution provider '{other}' (expected cpu|coreml)")),
+        }
+    }
 }
 
 /// Phase-2 ONNX session wrapper.
 pub struct Phase2Model {
     session: Session,
     model_path: PathBuf,
+    provider: ExecutionProviderKind,
 }
 
 impl Phase2Model {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, InferError> {
+        Self::load_with_provider(path, ExecutionProviderKind::Cpu)
+    }
+
+    pub fn load_with_provider(
+        path: impl AsRef<Path>,
+        provider: ExecutionProviderKind,
+    ) -> Result<Self, InferError> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(InferError::ModelNotFound(path.display().to_string()));
         }
-        let session = Session::builder()?.commit_from_file(path)?;
+
+        let mut builder = Session::builder()?
+            .with_no_environment_execution_providers()
+            .map_err(ort::Error::<()>::from)?;
+        match provider {
+            ExecutionProviderKind::Cpu => {
+                // Explicit CPU-only session (no env EPs).
+            }
+            ExecutionProviderKind::Coreml => {
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                {
+                    use ort::ep::{self, coreml::ComputeUnits, coreml::ModelFormat};
+
+                    // Prefer Apple accelerators; fall back within CoreML/ORT as needed.
+                    let cache_dir = path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(".coreml-cache");
+                    let _ = std::fs::create_dir_all(&cache_dir);
+                    let coreml = ep::CoreML::default()
+                        .with_compute_units(ComputeUnits::All)
+                        // NeuralNetwork is more compatible with this model's AvgPool/ops;
+                        // MLProgram currently fails to compile (missing AvgPool1D 'pad').
+                        .with_model_format(ModelFormat::NeuralNetwork)
+                        .with_static_input_shapes(true)
+                        .with_specialization_strategy(
+                            ep::coreml::SpecializationStrategy::FastPrediction,
+                        )
+                        .with_model_cache_dir(cache_dir.display().to_string())
+                        .build();
+                    builder = builder
+                        .with_execution_providers([coreml])
+                        .map_err(ort::Error::<()>::from)?;
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+                {
+                    return Err(InferError::ProviderUnavailable("coreml".into()));
+                }
+            }
+        }
+
+        let session = builder.commit_from_file(path)?;
         Ok(Self {
             session,
             model_path: path.to_path_buf(),
+            provider,
         })
     }
 
     pub fn model_path(&self) -> &Path {
         &self.model_path
+    }
+
+    pub fn provider(&self) -> ExecutionProviderKind {
+        self.provider
     }
 
     /// Run inference on one preprocessed window (`WINDOW_SAMPLES` float32 samples).

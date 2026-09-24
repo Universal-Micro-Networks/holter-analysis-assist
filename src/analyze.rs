@@ -1,6 +1,6 @@
 //! End-to-end ECL analysis pipeline (BeatSense `analyzer.py` Rust port).
 
-use crate::phase2::{Phase2Model, WINDOW_SAMPLES};
+use crate::phase2::{ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
 use crate::postprocess::{
     build_rhythm_intervals, build_unknown_intervals, center_best_beats, classify_event_sigmoid,
     cluster_candidates, complement_intervals, detect_run_candidates, extract_window_candidates,
@@ -54,7 +54,7 @@ pub fn analyze_ecl(
     onnx_path: &Path,
     output_csv: &Path,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
-    analyze_ecl_with_limit(ecl_path, onnx_path, output_csv, None)
+    analyze_ecl_with_limit(ecl_path, onnx_path, output_csv, None, ExecutionProviderKind::Cpu)
 }
 
 pub fn analyze_ecl_with_limit(
@@ -62,6 +62,7 @@ pub fn analyze_ecl_with_limit(
     onnx_path: &Path,
     output_csv: &Path,
     max_windows: Option<usize>,
+    provider: ExecutionProviderKind,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
     let source_info = parse_ecl_filename(ecl_path)?;
     let ecg_all_250 = read_ecl_adc_counts(ecl_path)?;
@@ -73,8 +74,12 @@ pub fn analyze_ecl_with_limit(
         starts.truncate(limit);
     }
 
-    eprintln!("[2/6] ONNX inference: windows={}", starts.len());
-    let mut model = Phase2Model::load(onnx_path)?;
+    eprintln!(
+        "[2/6] ONNX inference: windows={} provider={}",
+        starts.len(),
+        provider
+    );
+    let mut model = Phase2Model::load_with_provider(onnx_path, provider)?;
     let mut all_candidates = Vec::new();
     let mut rhythm_windows = Vec::new();
 

@@ -15,8 +15,8 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use phase2::{
-    BeatClass, Phase2Model, RhythmClass, WindowOutputs, TH_AF, TH_BEAT, TH_PAC, TH_PVC,
-    WINDOW_SAMPLES,
+    BeatClass, ExecutionProviderKind, Phase2Model, RhythmClass, WindowOutputs, TH_AF, TH_BEAT,
+    TH_PAC, TH_PVC, WINDOW_SAMPLES,
 };
 
 /// Legacy / simplified rhythm labels for the early CLI stub.

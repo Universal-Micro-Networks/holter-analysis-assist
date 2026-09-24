@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use holter_analysis_assist::analyze::analyze_ecl_with_limit;
-use holter_analysis_assist::phase2::{self, Phase2Model, WINDOW_SAMPLES};
+use holter_analysis_assist::phase2::{self, ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
 use holter_analysis_assist::{classify_ecg, ClassificationResult};
 use serde::Serialize;
 use std::fs;
@@ -47,6 +47,10 @@ enum Commands {
 
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
+
+        /// ONNX Runtime execution provider (`cpu` or `coreml` on Apple).
+        #[arg(long, value_enum, default_value_t = ProviderArg::Cpu)]
+        provider: ProviderArg,
     },
 
     /// Analyze a full ECL file → beat_results.csv (preprocess + ONNX + postprocess).
@@ -66,6 +70,10 @@ enum Commands {
         /// Optional cap on number of 20s windows (smoke / debug).
         #[arg(long)]
         max_windows: Option<usize>,
+
+        /// ONNX Runtime execution provider (`cpu` or `coreml` on Apple).
+        #[arg(long, value_enum, default_value_t = ProviderArg::Cpu)]
+        provider: ProviderArg,
     },
 }
 
@@ -75,9 +83,26 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum, Default)]
+enum ProviderArg {
+    #[default]
+    Cpu,
+    Coreml,
+}
+
+impl From<ProviderArg> for ExecutionProviderKind {
+    fn from(value: ProviderArg) -> Self {
+        match value {
+            ProviderArg::Cpu => Self::Cpu,
+            ProviderArg::Coreml => Self::Coreml,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct InferWindowReport {
     model: String,
+    provider: String,
     rhythm_score: f32,
     rhythm_class: String,
     summary_beat_class: String,
@@ -114,7 +139,8 @@ fn main() -> ExitCode {
             input,
             zscore,
             format,
-        } => match run_infer_window(model, input, zscore, format) {
+            provider,
+        } => match run_infer_window(model, input, zscore, format, provider.into()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err}");
@@ -126,7 +152,14 @@ fn main() -> ExitCode {
             model,
             output,
             max_windows,
-        } => match analyze_ecl_with_limit(&ecl, &model, &output, max_windows) {
+            provider,
+        } => match analyze_ecl_with_limit(
+            &ecl,
+            &model,
+            &output,
+            max_windows,
+            provider.into(),
+        ) {
             Ok((_rows, summary)) => {
                 println!("saved: {}", output.display());
                 println!("beats: {}", summary.beats);
@@ -148,6 +181,7 @@ fn run_infer_window(
     input: Option<PathBuf>,
     zscore: bool,
     format: OutputFormat,
+    provider: ExecutionProviderKind,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut samples = match input {
         Some(path) => load_f32_window(&path)?,
@@ -157,7 +191,7 @@ fn run_infer_window(
         phase2::zscore_window(&mut samples);
     }
 
-    let mut model = Phase2Model::load(&model_path)?;
+    let mut model = Phase2Model::load_with_provider(&model_path, provider)?;
     let out = model.infer_window(&samples)?;
 
     let beat_mean = out.beat.iter().sum::<f32>() / out.beat.len() as f32;
@@ -170,6 +204,7 @@ fn run_infer_window(
     let n = out.event.len() as f32;
     let report = InferWindowReport {
         model: model_path.display().to_string(),
+        provider: provider.as_str().to_string(),
         rhythm_score: out.rhythm,
         rhythm_class: out.rhythm_class().as_str().to_string(),
         summary_beat_class: out.summary_beat_class().as_str().to_string(),
@@ -188,6 +223,7 @@ fn run_infer_window(
     match format {
         OutputFormat::Text => {
             println!("model:              {}", report.model);
+            println!("provider:           {}", report.provider);
             println!("rhythm_score:       {:.4}", report.rhythm_score);
             println!("rhythm_class:       {}", report.rhythm_class);
             println!("summary_beat_class: {}", report.summary_beat_class);
