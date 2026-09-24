@@ -229,15 +229,6 @@ def main() -> int:
     except Exception as e:
         print(f"CUDA bench failed: {e}")
 
-    ort_rs_coreml = None
-    if sys.platform == "darwin":
-        print("Benchmark Rust ort (CoreML) ...")
-        try:
-            ort_rs_coreml = bench_rust_ort(args.onnx, windows, args.warmup, "coreml")
-            print(json.dumps(ort_rs_coreml, indent=2))
-        except Exception as e:
-            print(f"CoreML bench failed: {e}")
-
     def speedup(a: dict | None, b: dict | None) -> float | None:
         if not a or not b or not a.get("mean_ms") or not b.get("mean_ms"):
             return None
@@ -252,14 +243,11 @@ def main() -> int:
         "onnxruntime_python": ort_py,
         "ort_rust_cpu": ort_rs_cpu,
         "ort_rust_cuda": ort_rs_cuda,
-        "ort_rust_coreml": ort_rs_coreml,
         "speedup_mean": {
             "keras_over_ort_python": speedup(keras, ort_py),
             "keras_over_ort_rust_cpu": speedup(keras, ort_rs_cpu),
             "keras_over_ort_rust_cuda": speedup(keras, ort_rs_cuda),
-            "keras_over_ort_rust_coreml": speedup(keras, ort_rs_coreml),
             "ort_rust_cpu_over_cuda": speedup(ort_rs_cpu, ort_rs_cuda),
-            "ort_rust_cpu_over_coreml": speedup(ort_rs_cpu, ort_rs_coreml),
         },
     }
     out = args.outdir / f"bench_infer_w{args.max_windows}.json"

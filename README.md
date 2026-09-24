@@ -29,14 +29,11 @@ cargo run -- classify path/to/ecg.bin --format json
 # Phase-2 ONNX reference（20s @ 500Hz window）
 cargo run -- infer-window --model resources/models/phase2_rev1.onnx --format json
 
-# Auto EP（CUDA → CoreML → CPU）
+# Auto EP（CUDA → CPU）
 cargo run --release -- infer-window --provider auto --format json
 
 # NVIDIA GPU（CUDA）
 cargo run --release -- infer-window --provider cuda --format json
-
-# Apple Silicon: CoreML（GPU / Neural Engine）
-cargo run --release -- infer-window --provider coreml --format json
 
 # Full ECL pipeline（preprocess → ONNX → overlap postprocess → CSV）
 cargo run --release -- analyze-ecl resources/samples/sample.ecl \
@@ -51,12 +48,11 @@ cargo run --release -- analyze-ecl resources/samples/sample.ecl --max-windows 5
 
 ### Execution providers
 
-デフォルトは `--provider auto`（優先順位: **CUDA → CoreML → CPU**）。明示指定も可能です。
+デフォルトは `--provider auto`（優先順位: **CUDA → CPU**）。明示指定も可能です。
 
 | Provider | 対象 | ランタイム要件 |
 |---|---|---|
 | `cuda` | NVIDIA GPU | CUDA Toolkit ≥13.2 + cuDNN ≥9.23（いずれも PATH） |
-| `coreml` | Apple Silicon | macOS / iOS |
 | `cpu` | 全環境 | 追加要件なし |
 | `auto` | 全環境 | 上から順に試し、使えたものを採用 |
 
@@ -89,14 +85,6 @@ CPU vs CUDA 比較（ECL から窓を切り出し）:
 $env:PYTHONPATH="tools"
 python tools/compare/bench_inference.py --max-windows 50
 ```
-
-#### Apple Silicon（CoreML）
-
-`--provider coreml` で ONNX Runtime の CoreML EP（GPU / Neural Engine）を使えます。
-
-- モデル形式は **NeuralNetwork**（`MLProgram` はこのモデルの AvgPool1D でコンパイル失敗するため）
-- 初回ロードは CoreML コンパイルで数十秒かかることがあります（`resources/models/.coreml-cache/` にキャッシュ）
-- この Phase-2 モデルでは CPU 比の推論高速化は限定的（~1.05x 程度）。ロードコストが大きいので短時間ジョブでは CPU の方が速いことがあります
 
 ## モデルリソース
 

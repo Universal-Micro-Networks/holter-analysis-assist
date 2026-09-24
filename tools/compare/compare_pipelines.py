@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         default="cpu",
-        choices=["auto", "cpu", "cuda", "coreml"],
+        choices=["auto", "cpu", "cuda"],
         help="Rust ONNX execution provider",
     )
     return p.parse_args()

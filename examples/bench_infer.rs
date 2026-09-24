@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   cargo run --release --example bench_infer -- \
-//!     resources/models/phase2_rev1.onnx /path/to/windows auto|cpu|cuda|coreml [warmup]
+//!     resources/models/phase2_rev1.onnx /path/to/windows auto|cpu|cuda [warmup]
 use holter_analysis_assist::phase2::{ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
 use std::env;
 use std::fs;

@@ -145,15 +145,13 @@ pub enum InferError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutionProviderKind {
-    /// Prefer CUDA → CoreML → CPU (compiled / platform availability).
+    /// Prefer CUDA → CPU (compiled / platform availability).
     #[default]
     Auto,
     /// Explicit CPU EP.
     Cpu,
     /// NVIDIA CUDA EP (requires `cuda` feature + CUDA Toolkit / cuDNN at runtime).
     Cuda,
-    /// Apple CoreML (GPU / Neural Engine / CPU via Apple ML stack). macOS/iOS only.
-    Coreml,
 }
 
 impl ExecutionProviderKind {
@@ -162,13 +160,12 @@ impl ExecutionProviderKind {
             Self::Auto => "auto",
             Self::Cpu => "cpu",
             Self::Cuda => "cuda",
-            Self::Coreml => "coreml",
         }
     }
 
     /// Providers to try for `auto`, in priority order.
     pub fn auto_candidates() -> &'static [ExecutionProviderKind] {
-        &[Self::Cuda, Self::Coreml, Self::Cpu]
+        &[Self::Cuda, Self::Cpu]
     }
 }
 
@@ -185,9 +182,8 @@ impl std::str::FromStr for ExecutionProviderKind {
             "auto" => Ok(Self::Auto),
             "cpu" => Ok(Self::Cpu),
             "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
-            "coreml" | "core-ml" => Ok(Self::Coreml),
             other => Err(format!(
-                "unknown execution provider '{other}' (expected auto|cpu|cuda|coreml)"
+                "unknown execution provider '{other}' (expected auto|cpu|cuda)"
             )),
         }
     }
@@ -273,44 +269,6 @@ impl Phase2Model {
                     return Err(InferError::ProviderUnavailable(
                         "cuda (build with --features cuda)".into(),
                     ));
-                }
-            }
-            ExecutionProviderKind::Coreml => {
-                #[cfg(all(
-                    feature = "coreml",
-                    any(target_os = "macos", target_os = "ios")
-                ))]
-                {
-                    use ort::ep::{self, coreml::ComputeUnits, coreml::ModelFormat};
-
-                    // Prefer Apple accelerators; fall back within CoreML/ORT as needed.
-                    let cache_dir = path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .join(".coreml-cache");
-                    let _ = std::fs::create_dir_all(&cache_dir);
-                    let coreml = ep::CoreML::default()
-                        .with_compute_units(ComputeUnits::All)
-                        // NeuralNetwork is more compatible with this model's AvgPool/ops;
-                        // MLProgram currently fails to compile (missing AvgPool1D 'pad').
-                        .with_model_format(ModelFormat::NeuralNetwork)
-                        .with_static_input_shapes(true)
-                        .with_specialization_strategy(
-                            ep::coreml::SpecializationStrategy::FastPrediction,
-                        )
-                        .with_model_cache_dir(cache_dir.display().to_string())
-                        .build()
-                        .error_on_failure();
-                    builder = builder
-                        .with_execution_providers([coreml])
-                        .map_err(ort::Error::<()>::from)?;
-                }
-                #[cfg(not(all(
-                    feature = "coreml",
-                    any(target_os = "macos", target_os = "ios")
-                )))]
-                {
-                    return Err(InferError::ProviderUnavailable("coreml".into()));
                 }
             }
         }
@@ -488,11 +446,7 @@ mod tests {
         );
         assert_eq!(
             ExecutionProviderKind::auto_candidates(),
-            &[
-                ExecutionProviderKind::Cuda,
-                ExecutionProviderKind::Coreml,
-                ExecutionProviderKind::Cpu
-            ]
+            &[ExecutionProviderKind::Cuda, ExecutionProviderKind::Cpu]
         );
     }
 

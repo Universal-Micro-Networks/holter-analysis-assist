@@ -48,7 +48,7 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
 
-        /// ONNX Runtime EP: `auto` (CUDA→CoreML→CPU), `cuda`, `coreml`, or `cpu`.
+        /// ONNX Runtime EP: `auto` (CUDA→CPU), `cuda`, or `cpu`.
         #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
         provider: ProviderArg,
     },
@@ -71,7 +71,7 @@ enum Commands {
         #[arg(long)]
         max_windows: Option<usize>,
 
-        /// ONNX Runtime EP: `auto` (CUDA→CoreML→CPU), `cuda`, `coreml`, or `cpu`.
+        /// ONNX Runtime EP: `auto` (CUDA→CPU), `cuda`, or `cpu`.
         #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
         provider: ProviderArg,
     },
@@ -89,7 +89,6 @@ enum ProviderArg {
     Auto,
     Cpu,
     Cuda,
-    Coreml,
 }
 
 impl From<ProviderArg> for ExecutionProviderKind {
@@ -98,7 +97,6 @@ impl From<ProviderArg> for ExecutionProviderKind {
             ProviderArg::Auto => Self::Auto,
             ProviderArg::Cpu => Self::Cpu,
             ProviderArg::Cuda => Self::Cuda,
-            ProviderArg::Coreml => Self::Coreml,
         }
     }
 }
