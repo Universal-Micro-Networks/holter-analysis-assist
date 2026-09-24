@@ -10,8 +10,10 @@
 
 - **Language**: Rust (edition 2021, MSRV 1.74+)
 - **CLI**: clap (derive)
+- **ONNX inference**: ort `=2.0.0-rc.13` (+ ndarray)
 - **Serialization**: serde / serde_json
 - **Errors**: thiserror
+- **Export tooling**: Python TensorFlow + tf2onnx (`tools/export/`)
 
 ## Development Standards
 

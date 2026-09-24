@@ -25,8 +25,12 @@ cargo build
 cargo test
 cargo run -- classify path/to/ecg.bin
 cargo run -- classify path/to/ecg.bin --format json
+
+# Phase-2 ONNX reference（20s @ 500Hz window）
+cargo run -- infer-window --model resources/models/phase2_rev1.onnx --format json
 ```
 
+`infer-window` は前処理済み float32 LE 窓（40,000 bytes = 10,000 samples）を `--input` で渡せます。省略時は合成サイン波でスモークします。
 ## モデルリソース
 
 推論用重み / ONNX は `resources/models/` に配置します（バイナリは Git 管理外）。

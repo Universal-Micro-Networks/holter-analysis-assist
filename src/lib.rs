@@ -1,13 +1,21 @@
 //! Holter ECG arrhythmia classification library.
 //!
 //! CLI is the first surface; the same types will back a future HTTP API.
+//! Phase-2 ONNX inference lives in [`phase2`] (BeatSense reference contract).
+
+pub mod phase2;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
-/// Rhythm classes supported in v0.
+pub use phase2::{
+    BeatClass, Phase2Model, RhythmClass, WindowOutputs, TH_AF, TH_BEAT, TH_PAC, TH_PVC,
+    WINDOW_SAMPLES,
+};
+
+/// Legacy / simplified rhythm labels for the early CLI stub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum RhythmLabel {
@@ -62,7 +70,7 @@ pub enum ClassifyError {
 ///
 /// Current implementation is a **stub**: it validates the file exists and is
 /// non-empty, then returns [`RhythmLabel::Normal`] with confidence 0.0.
-/// Real inference will replace this body without changing the CLI/API shape.
+/// Use [`phase2::Phase2Model`] for real ONNX window inference.
 pub fn classify_ecg(path: &Path) -> Result<ClassificationResult, ClassifyError> {
     if !path.exists() {
         return Err(ClassifyError::NotFound(path.display().to_string()));
@@ -77,7 +85,7 @@ pub fn classify_ecg(path: &Path) -> Result<ClassificationResult, ClassifyError> 
         label: RhythmLabel::Normal,
         confidence: 0.0,
         input_path: path.display().to_string(),
-        notes: "stub classifier: inference not implemented yet".to_string(),
+        notes: "stub classifier: use `infer-window` for Phase-2 ONNX".to_string(),
     })
 }
 

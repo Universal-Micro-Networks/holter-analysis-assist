@@ -25,8 +25,16 @@ Library-first / thin binary。ドメインは `lib`、起動面は `main`（将�
 
 ### Runtime ML resources
 **Location**: `resources/models/`  
-**Purpose**: 推論用重みなど実行時リソース（大きなバイナリは gitignore）  
-**Example**: `phase2_internal_finetuned_eventstrong_noise_20s10s_rev1.weights.h5`
+**Purpose**: 推論用重み / ONNX など実行時リソース（大きなバイナリは gitignore）  
+**Example**: `phase2_rev1.onnx`, `phase2_*.weights.h5`
+
+### BeatSense Python reference
+**Location**: `tools/beatsense/`  
+**Purpose**: `build_model` / 前処理 / 後処理の正本（ONNX export と Rust 移植の参照）
+
+### Phase-2 Rust inference
+**Location**: `src/phase2.rs`  
+**Purpose**: `ort` による window 推論（beat / event / rhythm）
 
 ## Naming Conventions
 

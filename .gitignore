@@ -34,3 +34,7 @@ resources/models/**
 # Local Python export / tooling venvs
 .venv-export/
 .venv/
+
+__pycache__/
+*.py[cod]
+:memory:.ses

@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use holter_analysis_assist::phase2::{self, Phase2Model, WINDOW_SAMPLES};
 use holter_analysis_assist::{classify_ecg, ClassificationResult};
+use serde::Serialize;
+use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -7,7 +10,7 @@ use std::process::ExitCode;
 #[command(
     name = "holter-analysis-assist",
     version,
-    about = "Holter ECG arrhythmia classification assist (NORMAL / AF / PAC / PVC)"
+    about = "Holter ECG arrhythmia assist — CLI stub + Phase-2 ONNX reference"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -26,6 +29,24 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
+
+    /// Run Phase-2 ONNX inference on one 20s @ 500Hz window (10_000 float32 samples).
+    InferWindow {
+        /// ONNX model path (default: resources/models/phase2_rev1.onnx).
+        #[arg(long, default_value = "resources/models/phase2_rev1.onnx")]
+        model: PathBuf,
+
+        /// Raw float32 little-endian window file (40_000 bytes). If omitted, uses a synthetic sine.
+        #[arg(long)]
+        input: Option<PathBuf>,
+
+        /// Apply external per-window z-score before inference (BeatSense preprocess).
+        #[arg(long, default_value_t = true)]
+        zscore: bool,
+
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -34,14 +55,47 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Serialize)]
+struct InferWindowReport {
+    model: String,
+    rhythm_score: f32,
+    rhythm_class: String,
+    summary_beat_class: String,
+    beat_mean: f32,
+    event_mean_pac: f32,
+    event_mean_pvc: f32,
+    event_mean_n: f32,
+    thresholds: Thresholds,
+}
+
+#[derive(Serialize)]
+struct Thresholds {
+    beat: f32,
+    pac: f32,
+    pvc: f32,
+    af: f32,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Commands::Classify { input, format } => match classify_ecg(&input) {
             Ok(result) => {
-                print_result(&result, format);
+                print_classify(&result, format);
                 ExitCode::SUCCESS
             }
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
+        },
+        Commands::InferWindow {
+            model,
+            input,
+            zscore,
+            format,
+        } => match run_infer_window(model, input, zscore, format) {
+            Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err}");
                 ExitCode::FAILURE
@@ -50,7 +104,96 @@ fn main() -> ExitCode {
     }
 }
 
-fn print_result(result: &ClassificationResult, format: OutputFormat) {
+fn run_infer_window(
+    model_path: PathBuf,
+    input: Option<PathBuf>,
+    zscore: bool,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut samples = match input {
+        Some(path) => load_f32_window(&path)?,
+        None => synthetic_window(),
+    };
+    if zscore {
+        phase2::zscore_window(&mut samples);
+    }
+
+    let mut model = Phase2Model::load(&model_path)?;
+    let out = model.infer_window(&samples)?;
+
+    let beat_mean = out.beat.iter().sum::<f32>() / out.beat.len() as f32;
+    let mut event_sum = [0.0_f32; 3];
+    for row in &out.event {
+        event_sum[0] += row[0];
+        event_sum[1] += row[1];
+        event_sum[2] += row[2];
+    }
+    let n = out.event.len() as f32;
+    let report = InferWindowReport {
+        model: model_path.display().to_string(),
+        rhythm_score: out.rhythm,
+        rhythm_class: out.rhythm_class().as_str().to_string(),
+        summary_beat_class: out.summary_beat_class().as_str().to_string(),
+        beat_mean,
+        event_mean_pac: event_sum[0] / n,
+        event_mean_pvc: event_sum[1] / n,
+        event_mean_n: event_sum[2] / n,
+        thresholds: Thresholds {
+            beat: phase2::TH_BEAT,
+            pac: phase2::TH_PAC,
+            pvc: phase2::TH_PVC,
+            af: phase2::TH_AF,
+        },
+    };
+
+    match format {
+        OutputFormat::Text => {
+            println!("model:              {}", report.model);
+            println!("rhythm_score:       {:.4}", report.rhythm_score);
+            println!("rhythm_class:       {}", report.rhythm_class);
+            println!("summary_beat_class: {}", report.summary_beat_class);
+            println!("beat_mean:          {:.4}", report.beat_mean);
+            println!(
+                "event_mean:         PAC={:.4} PVC={:.4} N={:.4}",
+                report.event_mean_pac, report.event_mean_pvc, report.event_mean_n
+            );
+        }
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+    Ok(())
+}
+
+fn load_f32_window(path: &PathBuf) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let bytes = fs::read(path)?;
+    if bytes.len() != WINDOW_SAMPLES * 4 {
+        return Err(format!(
+            "expected {} bytes ({} float32 LE samples), got {}",
+            WINDOW_SAMPLES * 4,
+            WINDOW_SAMPLES,
+            bytes.len()
+        )
+        .into());
+    }
+    let mut samples = Vec::with_capacity(WINDOW_SAMPLES);
+    for chunk in bytes.chunks_exact(4) {
+        samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(samples)
+}
+
+fn synthetic_window() -> Vec<f32> {
+    // ~1.2 Hz sine @ 500 Hz — enough for a deterministic smoke path.
+    (0..WINDOW_SAMPLES)
+        .map(|i| {
+            let t = i as f32 / phase2::MODEL_FS_HZ as f32;
+            (2.0 * std::f32::consts::PI * 1.2 * t).sin()
+        })
+        .collect()
+}
+
+fn print_classify(result: &ClassificationResult, format: OutputFormat) {
     match format {
         OutputFormat::Text => {
             println!("input:      {}", result.input_path);
