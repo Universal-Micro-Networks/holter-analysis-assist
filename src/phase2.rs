@@ -223,13 +223,18 @@ fn extract_named_flat(
 
 /// Apply the same per-window z-score used in BeatSense external preprocessing.
 pub fn zscore_window(samples: &mut [f32]) {
+    zscore_window_eps(samples, 1e-6);
+}
+
+pub fn zscore_window_eps(samples: &mut [f32], eps: f32) {
     let n = samples.len() as f32;
     if n == 0.0 {
         return;
     }
     let mean = samples.iter().sum::<f32>() / n;
     let var = samples.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / n;
-    let std = var.sqrt().max(1e-6);
+    let std = var.sqrt();
+    let std = if std < eps { 1.0 } else { std };
     for x in samples.iter_mut() {
         *x = (*x - mean) / std;
     }

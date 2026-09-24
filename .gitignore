@@ -31,9 +31,9 @@ resources/models/**
 *.pth
 *.safetensors
 
-# Local Python export / tooling venvs
-.venv-export/
-.venv/
+# Local samples / goldens (optional; not required in git)
+resources/samples/
+output/
 
 __pycache__/
 *.py[cod]

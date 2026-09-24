@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use holter_analysis_assist::analyze::analyze_ecl_with_limit;
 use holter_analysis_assist::phase2::{self, Phase2Model, WINDOW_SAMPLES};
 use holter_analysis_assist::{classify_ecg, ClassificationResult};
 use serde::Serialize;
@@ -46,6 +47,25 @@ enum Commands {
 
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
+    },
+
+    /// Analyze a full ECL file → beat_results.csv (preprocess + ONNX + postprocess).
+    AnalyzeEcl {
+        /// Input ECL path (`[serial]_[yyyyMMdd]_[HHmm]_[HHmm].ecl`).
+        #[arg(value_name = "ECL")]
+        ecl: PathBuf,
+
+        /// Phase-2 ONNX model.
+        #[arg(long, default_value = "resources/models/phase2_rev1.onnx")]
+        model: PathBuf,
+
+        /// Output CSV path.
+        #[arg(long, default_value = "output/beat_results.csv")]
+        output: PathBuf,
+
+        /// Optional cap on number of 20s windows (smoke / debug).
+        #[arg(long)]
+        max_windows: Option<usize>,
     },
 }
 
@@ -96,6 +116,25 @@ fn main() -> ExitCode {
             format,
         } => match run_infer_window(model, input, zscore, format) {
             Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
+        },
+        Commands::AnalyzeEcl {
+            ecl,
+            model,
+            output,
+            max_windows,
+        } => match analyze_ecl_with_limit(&ecl, &model, &output, max_windows) {
+            Ok((_rows, summary)) => {
+                println!("saved: {}", output.display());
+                println!("beats: {}", summary.beats);
+                println!("windows: {}", summary.windows);
+                println!("Unknown=1: {}", summary.unknown_ones);
+                println!("short_run_flag=1: {}", summary.short_run_ones);
+                ExitCode::SUCCESS
+            }
             Err(err) => {
                 eprintln!("error: {err}");
                 ExitCode::FAILURE

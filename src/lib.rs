@@ -3,7 +3,11 @@
 //! CLI is the first surface; the same types will back a future HTTP API.
 //! Phase-2 ONNX inference lives in [`phase2`] (BeatSense reference contract).
 
+pub mod analyze;
+pub mod dsp;
 pub mod phase2;
+pub mod postprocess;
+pub mod preprocess;
 
 use serde::{Deserialize, Serialize};
 use std::fs;

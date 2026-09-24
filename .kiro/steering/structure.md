@@ -36,6 +36,10 @@ Library-first / thin binary。ドメインは `lib`、起動面は `main`（将�
 **Location**: `src/phase2.rs`  
 **Purpose**: `ort` による window 推論（beat / event / rhythm）
 
+### Preprocess / postprocess / analyze
+**Location**: `src/preprocess.rs`, `src/postprocess.rs`, `src/analyze.rs`, `src/dsp.rs`  
+**Purpose**: ECL→500Hz窓、overlap 統合、Unknown/RUN、`analyze-ecl` パイプライン
+
 ## Naming Conventions
 
 - **Files / modules**: snake_case
