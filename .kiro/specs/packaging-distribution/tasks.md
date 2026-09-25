@@ -48,8 +48,8 @@
   - _Depends: 1.2_
   - _Requirements: 3.1, 3.2, 3.3, 4.1, 6.1, 7.1_
 
-- [ ] 3. Integration: CI 公開配線
-- [ ] 3.1 CPU 既定の配布ジョブを CI に配線し成果物を公開する
+- [x] 3. Integration: CI 公開配線
+- [x] 3.1 CPU 既定の配布ジョブを CI に配線し成果物を公開する
   - Windows ジョブで Inno Setup、Linux ジョブで fpm（および rpm 生成に必要なツール）を明示インストールする前提をジョブに含める
   - 入力は上流 artifact **`release-embedded-http-api`**（埋め込み `holter-http-api`）。欠落時は packaging 失敗
   - model-embedding の **`release-embedded-cli` を再定義・拡張しない**（消費対象外）

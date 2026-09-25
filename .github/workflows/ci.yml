@@ -331,3 +331,162 @@ jobs:
           name: release-embedded-http-api-windows-x86_64
           path: target/${{ matrix.target }}/release/holter-http-api.exe
           if-no-files-found: error
+
+  package-windows:
+    # ReleasePublish (packaging-distribution): CPU-default Windows installer.
+    # Input (consume only): artifact family release-embedded-http-api
+    #   (embedded holter-http-api from http-api CiEmbedHttpRelease).
+    # Packaging OWN jobs: package-windows / package-linux
+    # Out of scope: do NOT redefine release-embedded-cli (model-embedding OWN).
+    # CUDA packaging is optional and separate — not part of this required CPU gate.
+    # Required packaging gate applies only when release-embedded-http-api succeeds.
+    # Soft-skip of upstream (no embed secrets) ⇒ packaging also skips via needs:
+    #   (keeps CI green; not a fail-open / silent packaging success).
+    # When packaging does run: missing artifact or verify/build failure → fail-closed.
+    name: package-windows (windows-x86_64-cpu)
+    needs: release-embedded-http-api
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release-embedded-http-api (Windows)
+        uses: actions/download-artifact@v4
+        with:
+          # Upstream family: release-embedded-http-api (matrix suffix for uniqueness).
+          # download-artifact fails if this artifact is missing (fail-closed).
+          name: release-embedded-http-api-windows-x86_64
+          path: ${{ runner.temp }}/release-embedded-http-api
+
+      - name: Resolve downloaded binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$(find "${RUNNER_TEMP}/release-embedded-http-api" -type f \( -name 'holter-http-api.exe' -o -name 'holter-http-api' \) | head -n1)"
+          if [[ -z "${BIN}" || ! -f "${BIN}" ]]; then
+            echo "error: release-embedded-http-api binary missing after download" >&2
+            exit 1
+          fi
+          echo "Downloaded embedded HTTP binary: ${BIN}"
+          echo "HOLTER_PKG_BINARY=${BIN}" >> "$GITHUB_ENV"
+
+      - name: Install Inno Setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          choco install innosetup -y --no-progress
+
+      - name: Prepare staging and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash packaging/scripts/prepare-staging.sh \
+            --os windows \
+            --binary "${HOLTER_PKG_BINARY}"
+          bash packaging/scripts/verify-artifact.sh packaging/out/staging/windows
+
+      - name: Build Inno installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Prefer tag-like ref names; otherwise Cargo.toml default (fpm/Inno-safe).
+          VER="${GITHUB_REF_NAME:-0.1.0}"
+          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+ ]]; then
+            VER="0.1.0"
+          fi
+          bash packaging/scripts/build-inno.sh --version "${VER}"
+
+      - name: Upload Windows installer (cpu)
+        uses: actions/upload-artifact@v4
+        with:
+          # OS / arch / cpu identifiable (Req 5.4 / 8.2)
+          name: packaging-windows-installer-windows-x86_64-cpu
+          path: packaging/out/windows/*
+          if-no-files-found: error
+
+  package-linux:
+    # ReleasePublish: CPU-default Linux Docker + deb/rpm.
+    # Consumes release-embedded-http-api; CUDA remains optional/separate.
+    # Required packaging gate applies only when release-embedded-http-api succeeds.
+    # Soft-skip of upstream ⇒ packaging also skips (needs:; CI stays green).
+    name: package-linux (linux-x86_64-cpu)
+    needs: release-embedded-http-api
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release-embedded-http-api (Linux)
+        uses: actions/download-artifact@v4
+        with:
+          # Upstream family: release-embedded-http-api (matrix suffix for uniqueness).
+          # download-artifact fails if this artifact is missing (fail-closed).
+          name: release-embedded-http-api-linux-x86_64
+          path: ${{ runner.temp }}/release-embedded-http-api
+
+      - name: Resolve downloaded binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$(find "${RUNNER_TEMP}/release-embedded-http-api" -type f -name 'holter-http-api' | head -n1)"
+          if [[ -z "${BIN}" || ! -f "${BIN}" ]]; then
+            echo "error: release-embedded-http-api binary missing after download" >&2
+            exit 1
+          fi
+          chmod +x "${BIN}"
+          echo "Downloaded embedded HTTP binary: ${BIN}"
+          echo "HOLTER_PKG_BINARY=${BIN}" >> "$GITHUB_ENV"
+
+      - name: Install fpm and rpm tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ruby ruby-dev build-essential rpm
+          sudo gem install fpm --no-document
+
+      - name: Prepare staging and verify
+        run: |
+          set -euo pipefail
+          bash packaging/scripts/prepare-staging.sh \
+            --os linux \
+            --binary "${HOLTER_PKG_BINARY}"
+          bash packaging/scripts/verify-artifact.sh packaging/out/staging/linux
+
+      - name: Build Docker image (cpu)
+        run: |
+          set -euo pipefail
+          TAG="holter-http-api:ci-linux-x86_64-cpu"
+          bash packaging/scripts/build-docker.sh --tag "${TAG}"
+          mkdir -p packaging/out/docker
+          docker save "${TAG}" | gzip > packaging/out/docker/holter-http-api-linux-x86_64-cpu.tar.gz
+
+      - name: Build deb and rpm (cpu)
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME:-0.1.0}"
+          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+ ]]; then
+            VER="0.1.0"
+          fi
+          bash packaging/linux/fpm.sh --version "${VER}"
+
+      - name: Upload Docker image archive (cpu)
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-docker-linux-x86_64-cpu
+          path: packaging/out/docker/holter-http-api-linux-x86_64-cpu.tar.gz
+          if-no-files-found: error
+
+      - name: Upload deb package (cpu)
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-deb-linux-x86_64-cpu
+          path: packaging/out/linux/*.deb
+          if-no-files-found: error
+
+      - name: Upload rpm package (cpu)
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-rpm-linux-x86_64-cpu
+          path: packaging/out/linux/*.rpm
+          if-no-files-found: error
