@@ -2,9 +2,54 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <title>Holter Analysis Assist Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Holter Analysis Assist コンソール</title>
+  <link rel="stylesheet" href="console.css">
 </head>
 <body>
-  <p>コンソール（プレースホルダ）</p>
+  <main class="console">
+    <header class="console__header">
+      <h1>Holter Analysis Assist コンソール</h1>
+      <p id="guidance" class="console__guidance">
+        この画面では、サービスの疎通確認（ヘルス確認）と ECL ファイルの単発解析ができます。
+        まずヘルス確認で到達を確かめ、ECL を選択してから解析を実行してください。
+        結果は画面に表示され、必要ならダウンロードできます。
+      </p>
+    </header>
+
+    <section class="console__section" aria-labelledby="health-heading">
+      <h2 id="health-heading">ヘルス確認</h2>
+      <button type="button" id="health-btn">ヘルス確認</button>
+      <p id="health-status" class="console__status" role="status" aria-live="polite">未確認</p>
+    </section>
+
+    <section class="console__section" aria-labelledby="analyze-heading">
+      <h2 id="analyze-heading">ECL 解析</h2>
+      <label for="ecl-file">ECL ファイルを選択</label>
+      <input type="file" id="ecl-file" name="ecl" accept=".ecl,application/octet-stream">
+
+      <label for="format-select">出力形式（任意）</label>
+      <select id="format-select">
+        <option value="">既定（サーバー設定に従う）</option>
+        <option value="csv">CSV</option>
+        <option value="json">JSON</option>
+      </select>
+
+      <button type="button" id="analyze-btn">解析を実行</button>
+      <p id="loading" class="console__loading" hidden>処理中です。完了までお待ちください…</p>
+    </section>
+
+    <section class="console__section" aria-labelledby="message-heading">
+      <h2 id="message-heading">メッセージ</h2>
+      <p id="error" class="console__error" role="alert" aria-live="assertive"></p>
+    </section>
+
+    <section class="console__section" aria-labelledby="result-heading">
+      <h2 id="result-heading">解析結果</h2>
+      <pre id="result" class="console__result" aria-live="polite"></pre>
+      <button type="button" id="download-btn" disabled>結果をダウンロード</button>
+    </section>
+  </main>
+  <script src="console.js"></script>
 </body>
 </html>
