@@ -56,8 +56,8 @@
   - _Depends: 3.1_
   - _Requirements: 3.1, 3.2, 4.1, 4.2_
 
-- [ ] 4. CI: 注入付き release とサイズ可視化を追加する
-- [ ] 4.1 Windows／Linux でモデル注入 release・サイズ計測・生モデル非同梱を自動化する
+- [x] 4. CI: 注入付き release とサイズ可視化を追加する
+- [x] 4.1 Windows／Linux でモデル注入 release・サイズ計測・生モデル非同梱を自動化する
   - CI ジョブ／アーティファクト名を `release-embedded-cli` とし、埋め込み **CLI** バイナリのみを対象にする
   - CI が秘密ストア／secret から一時モデルを配置し、埋め込み feature 付き release を両ターゲットで行う
   - release 成果物バイナリのサイズをログ等に記録し、100MB 超でも抑制しない
@@ -92,3 +92,6 @@
   - _Boundary: CiEmbedRelease_
   - _Depends: 4.1_
   - _Requirements: 6.1, 6.2_
+
+## Implementation Notes
+- GitHub Actions repository secrets are ~48KB max; production ONNX inject uses HOLTER_EMBEDDED_MODEL_URL (+ optional AUTH), not B64-only.
