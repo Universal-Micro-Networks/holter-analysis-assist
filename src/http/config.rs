@@ -418,5 +418,14 @@ server_url=https://license.example.com
             !body.contains("server_url=") || body.contains("license.ini.example"),
             "if server_url appears, it must be via license reference/merge guidance"
         );
+        // Task 5.3: manual smoke notes for real server / release-embedded-http-api.
+        assert!(
+            body.contains("release-embedded-http-api"),
+            "example must document manual smoke using release-embedded-http-api artifact"
+        );
+        assert!(
+            body.contains("/health") && body.contains("/v1/analyze"),
+            "manual smoke notes must mention health and analyze checks"
+        );
     }
 }

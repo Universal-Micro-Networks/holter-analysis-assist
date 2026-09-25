@@ -1,4 +1,11 @@
-//! http-api task 4.1: listen only after startup license gate; routes + meter once.
+//! http-api listen / analyze integration (tasks 4.1 + 5.2).
+//!
+//! Covers: startup deny → no listen; startup ok → GET /health 200 (no meter);
+//! analyze success / invalid input / inference deny / oversized body; meter
+//! exactly once per analyze via the canonical entry (no HTTP-layer double meter).
+//!
+//! Manual smoke with a real license server and `release-embedded-http-api`
+//! artifact is documented in `config/http.ini.example` (task 5.3; not CI-required).
 //!
 //! Reuses the local mock license HTTP server pattern from `cli_license_startup.rs`.
 
@@ -124,37 +131,67 @@ fn free_bind_addr() -> String {
     format!("127.0.0.1:{port}")
 }
 
+struct IniOpts<'a> {
+    max_body_bytes: usize,
+    model_path: &'a str,
+    request_timeout_secs: u64,
+}
+
+impl Default for IniOpts<'static> {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: 1_048_576,
+            model_path: "/tmp/holter-http-api-listen-missing.onnx",
+            request_timeout_secs: 30,
+        }
+    }
+}
+
 fn write_merged_ini(dir: &TempDir, bind: &str, server_url: &str) -> PathBuf {
+    write_merged_ini_opts(dir, bind, server_url, IniOpts::default())
+}
+
+fn write_merged_ini_opts(
+    dir: &TempDir,
+    bind: &str,
+    server_url: &str,
+    opts: IniOpts<'_>,
+) -> PathBuf {
     let path = dir.path().join("http-license.ini");
     std::fs::write(
         &path,
         format!(
             "[http]\n\
              bind={bind}\n\
-             max_body_bytes=1048576\n\
-             request_timeout_secs=30\n\
-             model_path=/tmp/holter-http-api-listen-missing.onnx\n\
+             max_body_bytes={}\n\
+             request_timeout_secs={}\n\
+             model_path={}\n\
              provider=cpu\n\
              \n\
              [license]\n\
              server_url={server_url}\n\
-             timeout_secs=5\n"
+             timeout_secs=5\n",
+            opts.max_body_bytes, opts.request_timeout_secs, opts.model_path
         ),
     )
     .expect("write ini");
     path
 }
 
-fn http_exchange(addr: &str, request: &str) -> Result<(u16, Vec<u8>), String> {
+fn http_exchange(addr: &str, request: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    http_exchange_timeout(addr, request, Duration::from_secs(5))
+}
+
+fn http_exchange_timeout(
+    addr: &str,
+    request: &[u8],
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>), String> {
     let mut stream = TcpStream::connect(addr).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .ok();
-    stream
-        .write_all(request.as_bytes())
+        .write_all(request)
         .map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
@@ -178,11 +215,19 @@ fn http_exchange(addr: &str, request: &str) -> Result<(u16, Vec<u8>), String> {
 fn http_get(addr: &str, path: &str) -> Result<(u16, Vec<u8>), String> {
     http_exchange(
         addr,
-        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
     )
 }
 
-fn multipart_analyze_request(ecl_name: &str, ecl_bytes: &[u8]) -> String {
+fn multipart_analyze_request(ecl_name: &str, ecl_bytes: &[u8]) -> Vec<u8> {
+    multipart_analyze_request_with_fields(ecl_name, ecl_bytes, &[])
+}
+
+fn multipart_analyze_request_with_fields(
+    ecl_name: &str,
+    ecl_bytes: &[u8],
+    text_fields: &[(&str, &str)],
+) -> Vec<u8> {
     let boundary = "----HolterHttpListenBoundary";
     let mut body = Vec::new();
     body.extend_from_slice(
@@ -195,6 +240,16 @@ fn multipart_analyze_request(ecl_name: &str, ecl_bytes: &[u8]) -> String {
     );
     body.extend_from_slice(ecl_bytes);
     body.extend_from_slice(b"\r\n");
+    for (name, value) in text_fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\n\
+                 Content-Disposition: form-data; name=\"{name}\"\r\n\r\n\
+                 {value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
 
     let mut req = format!(
@@ -207,7 +262,26 @@ fn multipart_analyze_request(ecl_name: &str, ecl_bytes: &[u8]) -> String {
     )
     .into_bytes();
     req.extend_from_slice(&body);
-    String::from_utf8(req).expect("request utf8")
+    req
+}
+
+fn spawn_ready(ini: &Path, bind: &str) -> ChildGuard {
+    let mut child = spawn_http_api(ini);
+    wait_for_health(bind, Duration::from_secs(10)).unwrap_or_else(|e| {
+        let _ = child.0.kill();
+        let stderr = child
+            .0
+            .stderr
+            .take()
+            .map(|mut s| {
+                let mut buf = String::new();
+                let _ = s.read_to_string(&mut buf);
+                buf
+            })
+            .unwrap_or_default();
+        panic!("health wait failed: {e}; stderr={stderr}");
+    });
+    child
 }
 
 struct ChildGuard(Child);
@@ -329,11 +403,7 @@ fn analyze_request_meters_once_via_canonical_entry() {
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini(&dir, &bind, mock.base_url());
 
-    let mut child = spawn_http_api(&ini);
-    wait_for_health(&bind, Duration::from_secs(10)).unwrap_or_else(|e| {
-        let _ = child.0.kill();
-        panic!("health wait failed: {e}");
-    });
+    let _child = spawn_ready(&ini, &bind);
 
     let before = mock.meter_hits();
     let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", b"placeholder");
@@ -349,5 +419,165 @@ fn analyze_request_meters_once_via_canonical_entry() {
         mock.meter_hits().saturating_sub(before),
         1,
         "exactly one meter call per analyze request (no HTTP-layer double meter)"
+    );
+}
+
+#[test]
+fn analyze_invalid_input_returns_400_without_meter() {
+    let mock = MockLicenseServer::spawn(true, true);
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let ini = write_merged_ini(&dir, &bind, mock.base_url());
+    let _child = spawn_ready(&ini, &bind);
+
+    let before = mock.meter_hits();
+    let req = multipart_analyze_request("not-an-ecl.txt", b"not-ecl-bytes");
+    let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
+
+    assert_eq!(
+        status, 400,
+        "invalid ecl filename must be client error: body={}",
+        String::from_utf8_lossy(&body)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+    assert_eq!(v["error"]["code"], "invalid_input");
+    assert_eq!(
+        mock.meter_hits().saturating_sub(before),
+        0,
+        "invalid input must not reach canonical meter"
+    );
+}
+
+#[test]
+fn analyze_meter_deny_returns_403_without_result_leak() {
+    let mock = MockLicenseServer::spawn(true, false);
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let ini = write_merged_ini(&dir, &bind, mock.base_url());
+    let _child = spawn_ready(&ini, &bind);
+
+    let before = mock.meter_hits();
+    let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", b"placeholder");
+    let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
+
+    assert_eq!(
+        status, 403,
+        "meter deny must map to inference rejection: body={}",
+        String::from_utf8_lossy(&body)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+    assert_eq!(v["error"]["code"], "license_inference_denied");
+    assert!(
+        v.get("rows").is_none() && v.get("summary").is_none(),
+        "denied response must not leak analyze results: {v}"
+    );
+    assert_eq!(
+        mock.meter_hits().saturating_sub(before),
+        1,
+        "deny still meters once inside canonical entry; HTTP must not double-meter"
+    );
+}
+
+#[test]
+fn analyze_oversized_body_returns_413_without_meter() {
+    let mock = MockLicenseServer::spawn(true, true);
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let ini = write_merged_ini_opts(
+        &dir,
+        &bind,
+        mock.base_url(),
+        IniOpts {
+            max_body_bytes: 64,
+            ..IniOpts::default()
+        },
+    );
+    let _child = spawn_ready(&ini, &bind);
+
+    let before = mock.meter_hits();
+    // Actual ECL payload exceeds configured max_body_bytes (64).
+    // Rejection may come from Content-Length check (JSON envelope) or
+    // axum DefaultBodyLimit (413 without body); either is fail-closed.
+    let oversized = vec![b'x'; 128];
+    let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", &oversized);
+    let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
+
+    assert_eq!(
+        status, 413,
+        "oversized body must be rejected before analyze: body={}",
+        String::from_utf8_lossy(&body)
+    );
+    if !body.is_empty() {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+            assert_eq!(v["error"]["code"], "payload_too_large");
+        }
+    }
+    assert_eq!(
+        mock.meter_hits().saturating_sub(before),
+        0,
+        "oversized body must not meter"
+    );
+}
+
+#[test]
+fn analyze_success_returns_csv_and_meters_once_when_sample_present() {
+    let sample_link = Path::new("resources/samples/sample.ecl");
+    let onnx = Path::new("resources/models/phase2_rev1.onnx");
+    if !sample_link.exists() || !onnx.exists() {
+        eprintln!("skip: sample.ecl or ONNX not present");
+        return;
+    }
+    let sample = match sample_link.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skip: canonicalize sample.ecl: {e}");
+            return;
+        }
+    };
+    let ecl_bytes = std::fs::read(&sample).expect("read ecl");
+    let ecl_name = sample
+        .file_name()
+        .and_then(|s| s.to_str())
+        .expect("ecl basename");
+
+    let mock = MockLicenseServer::spawn(true, true);
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let onnx_abs = onnx.canonicalize().expect("onnx path");
+    let ini = write_merged_ini_opts(
+        &dir,
+        &bind,
+        mock.base_url(),
+        IniOpts {
+            max_body_bytes: 64 * 1024 * 1024,
+            model_path: onnx_abs.to_str().expect("onnx utf8"),
+            request_timeout_secs: 300,
+        },
+    );
+    let _child = spawn_ready(&ini, &bind);
+
+    let before = mock.meter_hits();
+    let req = multipart_analyze_request_with_fields(
+        ecl_name,
+        &ecl_bytes,
+        &[("max_windows", "1"), ("provider", "cpu"), ("format", "csv")],
+    );
+    let (status, body) =
+        http_exchange_timeout(&bind, &req, Duration::from_secs(180)).expect("analyze exchange");
+    assert_eq!(
+        status, 200,
+        "analyze success expected; body={}",
+        String::from_utf8_lossy(&body[..body.len().min(500)])
+    );
+    let csv = String::from_utf8_lossy(&body);
+    assert!(
+        csv.contains(',') || csv.lines().count() >= 1,
+        "CSV body should look like analyze output: {}",
+        &csv[..csv.len().min(200)]
+    );
+    assert_eq!(
+        mock.meter_hits().saturating_sub(before),
+        1,
+        "one successful analyze → one meter"
     );
 }

@@ -35,3 +35,22 @@ bind=0.0.0.0:8080
 # Optional. ONNX Runtime execution provider. Default: auto (cuda then cpu).
 # Allowed: auto | cpu | cuda
 # provider=auto
+
+# ---------------------------------------------------------------------------
+# Manual smoke (NOT required in CI) — real license server + embedded binary
+# ---------------------------------------------------------------------------
+# When upstream license server and a `release-embedded-http-api` artifact are
+# available, operators can confirm the following (fail any step → do not ship):
+#
+# 1. Build / download: CI job `release-embedded-http-api` yields embedded
+#    `holter-http-api` (Win/Linux). No raw `.onnx` in the artifact.
+# 2. Config: merge this [http] section with upstream [license] from
+#    config/license.ini.example into one ini; point --config / HOLTER_HTTP_INI.
+# 3. Startup: process exits non-zero and does not listen if license check fails;
+#    on success, bind accepts connections.
+# 4. Health: GET /health → 200 {"status":"ok"} and does not call license meter.
+# 5. One analyze: POST /v1/analyze with multipart field `ecl` (valid filename)
+#    → success CSV/JSON; license meter counted once per request (not per window).
+#
+# Automated coverage of listen / deny / meter-once / oversize uses mock license
+# servers in tests/http_api_listen.rs (task 5.2). This block is operator guidance.
