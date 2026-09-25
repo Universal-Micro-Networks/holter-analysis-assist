@@ -15,21 +15,89 @@
   var errorEl = document.getElementById("error");
   var resultEl = document.getElementById("result");
   var downloadBtn = document.getElementById("download-btn");
+  var timingStatusEl = document.getElementById("timing-status");
+  var timingLabelEl = document.getElementById("timing-label");
+  var timingValueEl = document.getElementById("timing-value");
 
   var lastResult = null;
   var busy = false;
   var healthInFlight = false;
+  var elapsedTimer = null;
+  var analyzeStartedAt = 0;
+  var lastElapsedSec = 0;
+
+  function formatElapsed(seconds) {
+    if (seconds < 60) {
+      return seconds + " 秒";
+    }
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    return m + "分" + String(s).padStart(2, "0") + "秒（合計 " + seconds + " 秒）";
+  }
+
+  function stopElapsedTimer() {
+    if (elapsedTimer !== null) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = null;
+    }
+  }
+
+  function showTimingPanel() {
+    timingStatusEl.hidden = false;
+    timingStatusEl.removeAttribute("hidden");
+  }
+
+  function setTimingRunning(seconds) {
+    showTimingPanel();
+    timingStatusEl.classList.remove("is-done", "is-failed");
+    timingStatusEl.classList.add("is-running");
+    timingLabelEl.textContent = "経過時間";
+    timingValueEl.textContent = formatElapsed(seconds);
+  }
+
+  function setTimingFinished(seconds, ok) {
+    stopElapsedTimer();
+    showTimingPanel();
+    timingStatusEl.classList.remove("is-running");
+    timingStatusEl.classList.add(ok ? "is-done" : "is-failed");
+    timingLabelEl.textContent = ok ? "処理時間（完了）" : "処理時間（失敗）";
+    timingValueEl.textContent = formatElapsed(seconds);
+  }
+
+  function startElapsedTimer() {
+    stopElapsedTimer();
+    analyzeStartedAt = Date.now();
+    lastElapsedSec = 0;
+    setTimingRunning(0);
+    elapsedTimer = setInterval(function () {
+      lastElapsedSec = Math.floor((Date.now() - analyzeStartedAt) / 1000);
+      setTimingRunning(lastElapsedSec);
+    }, 250);
+  }
+
+  function hideLoading() {
+    loadingEl.hidden = true;
+    loadingEl.setAttribute("hidden", "");
+  }
+
+  function showLoading() {
+    loadingEl.hidden = false;
+    loadingEl.removeAttribute("hidden");
+    startElapsedTimer();
+  }
 
   function setBusy(isBusy) {
     busy = isBusy;
-    loadingEl.hidden = !isBusy;
     analyzeBtn.disabled = isBusy;
     eclInput.disabled = isBusy;
     formatSelect.disabled = isBusy;
     if (isBusy) {
       analyzeBtn.classList.add("is-loading");
+      showLoading();
     } else {
       analyzeBtn.classList.remove("is-loading");
+      hideLoading();
+      stopElapsedTimer();
     }
   }
 
@@ -43,16 +111,28 @@
     errorEl.hidden = !message;
   }
 
+  function hideDownload() {
+    downloadBtn.disabled = true;
+    downloadBtn.hidden = true;
+    downloadBtn.setAttribute("hidden", "");
+  }
+
+  function showDownload() {
+    downloadBtn.disabled = false;
+    downloadBtn.hidden = false;
+    downloadBtn.removeAttribute("hidden");
+  }
+
   function clearResult() {
     lastResult = null;
     resultEl.textContent = "";
-    downloadBtn.disabled = true;
+    hideDownload();
   }
 
   function showResult(body, kind, filename) {
     lastResult = { body: body, kind: kind, filename: filename };
     resultEl.textContent = body;
-    downloadBtn.disabled = false;
+    showDownload();
   }
 
   function prettyMaybeJson(text) {
@@ -183,6 +263,7 @@
     form.append("format", selectedFormat());
 
     setBusy(true);
+    var succeeded = false;
     try {
       var headers = {};
       if (selectedFormat() === "json") {
@@ -208,10 +289,17 @@
       var kind = guessKind(res.headers.get("content-type"), text);
       var display = kind === "json" ? prettyMaybeJson(text) : text;
       showResult(display, kind, downloadName(kind));
+      succeeded = true;
     } catch (err) {
       showError("解析に失敗しました。サーバーに到達できないか、通信が中断されました。");
     } finally {
+      lastElapsedSec = Math.max(
+        lastElapsedSec,
+        Math.floor((Date.now() - analyzeStartedAt) / 1000)
+      );
       setBusy(false);
+      hideLoading();
+      setTimingFinished(lastElapsedSec, succeeded);
     }
   }
 
@@ -245,6 +333,8 @@
   downloadBtn.addEventListener("click", onDownload);
 
   // Immediate health check, then every 10 seconds (no button).
+  hideLoading();
+  hideDownload();
   setHealthState("pending", "ヘルス確認中…");
   pollHealth();
   setInterval(pollHealth, HEALTH_POLL_MS);

@@ -128,8 +128,64 @@ body {
   background-color: color-mix(in srgb, var(--console-accent) 88%, #000);
 }
 
+/* Result download — solid green, easy to spot after success */
+#download-btn.button.is-success {
+  background-color: #1f9d55;
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+  min-width: 11rem;
+}
+
+#download-btn.button.is-success:hover {
+  background-color: #178a48;
+  color: #fff;
+}
+
+#download-btn[hidden],
+#loading[hidden],
+#timing-status[hidden],
+[hidden] {
+  display: none !important;
+}
+
 .console-loading {
   font-weight: 600;
+  color: #0b5cab;
+  margin-top: 0.75rem;
+}
+
+.console-timing {
+  margin: 0 0 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--console-line);
+  background: #f3f7fb;
+  color: var(--console-ink);
+  font-size: 0.9rem;
+}
+
+.console-timing.is-running {
+  border-color: color-mix(in srgb, #0b5cab 35%, var(--console-line));
+  background: color-mix(in srgb, #0b5cab 8%, #fff);
+  color: #0b5cab;
+}
+
+.console-timing.is-done {
+  border-color: color-mix(in srgb, var(--console-ok) 35%, var(--console-line));
+  background: color-mix(in srgb, var(--console-ok) 8%, #fff);
+  color: var(--console-ok);
+}
+
+.console-timing.is-failed {
+  border-color: color-mix(in srgb, var(--console-bad) 35%, var(--console-line));
+  background: color-mix(in srgb, var(--console-bad) 8%, #fff);
+  color: var(--console-bad);
+}
+
+.console-timing #timing-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
 .console-result {

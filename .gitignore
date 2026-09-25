@@ -48,3 +48,7 @@ packaging/out/
 __pycache__/
 *.py[cod]
 :memory:.ses
+
+# Local runtime ini (keep *.example in git)
+config/http.ini
+config/license.ini

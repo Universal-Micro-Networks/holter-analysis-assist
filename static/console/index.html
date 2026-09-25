@@ -74,7 +74,7 @@
               </div>
             </div>
 
-            <p id="loading" class="help is-info console-loading" hidden>
+            <p id="loading" class="help is-info console-loading" hidden aria-live="polite">
               処理中です。完了までお待ちください…
             </p>
 
@@ -90,11 +90,21 @@
                 <h2 class="title is-5 mb-0">出力</h2>
               </div>
               <div class="level-right">
-                <button type="button" class="button is-small is-outlined" id="download-btn" disabled>
+                <button
+                  type="button"
+                  class="button is-success"
+                  id="download-btn"
+                  hidden
+                  disabled
+                >
                   結果をダウンロード
                 </button>
               </div>
             </div>
+            <p id="timing-status" class="console-timing" hidden aria-live="polite">
+              <span id="timing-label">処理時間</span>:
+              <strong id="timing-value">—</strong>
+            </p>
             <pre id="result" class="console-result" aria-live="polite"></pre>
           </div>
         </div>
