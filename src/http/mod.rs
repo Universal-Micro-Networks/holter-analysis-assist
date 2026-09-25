@@ -8,16 +8,16 @@ pub mod error;
 pub mod handlers;
 pub mod response;
 pub mod routes;
-pub mod state;
 pub mod startup;
+pub mod state;
 
 pub use config::{HttpConfig, HttpConfigError};
 pub use error::{ErrorBody, ErrorDetail, HttpError};
-pub use handlers::{AnalyzeHandler, HealthBody, HealthHandler};
+pub use handlers::{static_ui_router, AnalyzeHandler, HealthBody, HealthHandler, StaticUiHandler};
 pub use response::{AnalyzeJsonBody, AnalyzeSummaryJson, ResponseCodec};
 pub use routes::build_router;
-pub use state::AppState;
 pub use startup::{install_and_ensure_startup_licensed, run, serve, StartupError};
+pub use state::AppState;
 
 /// Returns true when the HTTP module is linked and callable from the binary.
 pub fn module_ready() -> bool {

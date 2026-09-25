@@ -606,6 +606,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "mime_guess",
  "ndarray",
  "ort",
  "predicates",
