@@ -11,6 +11,9 @@ rust-version = "1.74"
 default = ["cuda"]
 # ONNX Runtime CUDA EP (NVIDIA GPU). Needs CUDA Toolkit ≥13.2 + cuDNN on PATH at runtime.
 cuda = ["ort/cuda"]
+# Build-time model embedding for release/distribution. Not in default.
+# Requires HOLTER_EMBEDDED_MODEL_PATH pointing to a readable non-empty model file.
+embedded-model = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std"] }
