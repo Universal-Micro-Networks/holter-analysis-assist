@@ -26,6 +26,7 @@ ndarray = "0.17"
 ort = { version = "=2.0.0-rc.13", default-features = true, features = ["lax-feature-matching"] }
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rust-embed = "8"
 rustfft = "6.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

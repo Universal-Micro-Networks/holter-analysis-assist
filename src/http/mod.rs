@@ -2,6 +2,7 @@
 //!
 //! Binary `holter-http-api` calls [`run`] for the fail-closed startup sequence.
 
+pub mod assets;
 pub mod config;
 pub mod error;
 pub mod handlers;
