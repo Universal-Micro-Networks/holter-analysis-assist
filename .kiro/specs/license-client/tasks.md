@@ -48,7 +48,7 @@
   - _Depends: 2.2_
   - _Requirements: 1.2, 1.3, 2.2, 2.3, 5.1, 5.2, 5.3, 8.1, 8.2, 9.1, 9.2, 9.3_
 
-- [ ] 4. Integration: 解析入口とプロセス起動への配線
+- [x] 4. Integration: 解析入口とプロセス起動への配線
 - [x] 4.1 正本入口 `analyze_ecl_with_source` で許可確認と利用計上を 1 回だけ行う
   - model-embedding による `ModelSource` 配線の後に、本仕様が `src/analyze.rs` へゲートを挿入する
   - meter / `ensure_inference_allowed` は正本入口先頭のみ。`analyze_ecl` / `analyze_ecl_with_limit` には追加しない（二重計上禁止）
@@ -60,7 +60,7 @@
   - _Depends: 3.2_
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 5.2, 5.3, 8.3, 9.2, 9.3_
 
-- [ ] 4.2 プロセス起動時に Gate を install し有効性確認を行い失敗時は起動を拒否する
+- [x] 4.2 プロセス起動時に Gate を install し有効性確認を行い失敗時は起動を拒否する
   - CLI `src/main.rs`（本仕様所有）でサブコマンド実行前に設定読取 → install → 起動ゲートを適用する
   - 失敗時は起動失敗として識別可能なメッセージで非 0 終了し、解析を開始しない
   - HTTP main も同一 install 契約を使うことを Cross-Spec Contracts どおり隣接仕様に委ねる（本タスクは CLI 側）

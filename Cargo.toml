@@ -17,7 +17,7 @@ embedded-model = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std"] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 csv = "1.3"
 ini = { package = "rust-ini", version = "0.21" }
 ndarray = "0.17"

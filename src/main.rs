@@ -1,10 +1,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use holter_analysis_assist::analyze::analyze_ecl_with_source;
+use holter_analysis_assist::license::{
+    LicenseConfig, LicenseError, LicenseGate, ReqwestLicenseClient,
+};
 use holter_analysis_assist::phase2::{self, ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
 use holter_analysis_assist::{classify_ecg, ClassificationResult, ModelSource};
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Development default when `--model` is omitted and `embedded-model` is off.
@@ -23,6 +26,9 @@ fn resolve_model_source(model: Option<PathBuf>) -> ModelSource {
     }
 }
 
+/// Default relative path when neither `--license-config` nor `HOLTER_LICENSE_INI` is set.
+const DEFAULT_LICENSE_INI: &str = "config/license.ini";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "holter-analysis-assist",
@@ -30,8 +36,29 @@ fn resolve_model_source(model: Option<PathBuf>) -> ModelSource {
     about = "Holter ECG arrhythmia assist — CLI stub + Phase-2 ONNX reference"
 )]
 struct Cli {
+    /// Path to license.ini (`[license]`). Overrides `HOLTER_LICENSE_INI`; default `config/license.ini`.
+    #[arg(
+        long = "license-config",
+        global = true,
+        env = "HOLTER_LICENSE_INI",
+        default_value = DEFAULT_LICENSE_INI,
+        value_name = "PATH"
+    )]
+    license_config: PathBuf,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Load ini → build HTTP client → install process-wide Gate → startup validity check.
+///
+/// Order matches CliStartupIntegration (design): load → construct → install → ensure_startup_licensed.
+/// Failures are fail-closed (no offline bypass); caller must exit before any subcommand.
+fn install_and_ensure_startup_licensed(ini_path: &Path) -> Result<(), LicenseError> {
+    let config = LicenseConfig::load_from_path(ini_path)?;
+    let client = ReqwestLicenseClient::new(config)?;
+    LicenseGate::install(LicenseGate::new(client))?;
+    LicenseGate::global().ensure_startup_licensed()
 }
 
 #[derive(Subcommand, Debug)]
@@ -143,6 +170,13 @@ struct Thresholds {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    if let Err(err) = install_and_ensure_startup_licensed(&cli.license_config) {
+        // StartupFailed / Config / install errors: identifiable; do not run subcommands.
+        eprintln!("error: {err}");
+        return ExitCode::FAILURE;
+    }
+
     match cli.command {
         Commands::Classify { input, format } => match classify_ecg(&input) {
             Ok(result) => {
