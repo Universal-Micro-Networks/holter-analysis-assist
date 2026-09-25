@@ -1,0 +1,317 @@
+# Release packaging: Windows installer + Docker image as GitHub Actions artifacts.
+#
+# Trigger: GitHub Release published (tag release).
+# Input: embedded holter-http-api (CPU) built with HOLTER_EMBEDDED_MODEL_* secrets.
+# Output (upload-artifact):
+#   - packaging-windows-installer-windows-x86_64-cpu
+#   - packaging-docker-linux-x86_64-cpu
+#
+# Fail-closed: missing embed secrets, missing binary, verify failure, or package
+# build failure fails the workflow (unlike ci.yml soft-skip for routine PRs).
+# Does not redefine release-embedded-cli. CUDA is out of scope (CPU default only).
+#
+# Required repository secrets (same as ci.yml CiEmbedHttpRelease):
+#   HOLTER_EMBEDDED_MODEL_URL          — primary (production-size ONNX HTTPS URL)
+#   HOLTER_EMBEDDED_MODEL_AUTH_HEADER  — optional Authorization for the URL
+#   HOLTER_EMBEDDED_MODEL_B64          — secondary (dev/fixture only; ~48KB limit)
+
+name: release-packaging
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >
+          Optional version/tag for local dispatch (e.g. 0.1.0). Ignored on
+          release events; release tag_name is used instead.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-packaging-${{ github.event.release.tag_name || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve version string used in installer / image tags.
+  # ---------------------------------------------------------------------------
+  resolve-version:
+    name: resolve-version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - name: Derive version from release tag or dispatch input
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          if [[ -z "${TAG}" ]]; then
+            echo "error: no release tag / dispatch tag provided" >&2
+            exit 1
+          fi
+          # Strip leading v/V for Inno/fpm-style numeric versions when present.
+          VER="${TAG#v}"
+          VER="${VER#V}"
+          if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "error: version must start with MAJOR.MINOR (got tag='${TAG}' → '${VER}')" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Using release tag=${TAG} version=${VER}"
+
+  # ---------------------------------------------------------------------------
+  # Build embedded holter-http-api for Win + Linux (CPU). Required for packaging.
+  # ---------------------------------------------------------------------------
+  build-embedded-http-api:
+    name: build-embedded-http-api (${{ matrix.target }})
+    needs: resolve-version
+    # Fail-closed when embed inject secrets are absent (release must not soft-skip).
+    if: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL != '' || secrets.HOLTER_EMBEDDED_MODEL_B64 != '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: release-embedded-http-api-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: release-embedded-http-api-windows-x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-embed-http-${{ matrix.target }}
+
+      - name: Materialize model for embed inject
+        shell: bash
+        env:
+          HOLTER_EMBEDDED_MODEL_URL: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL }}
+          HOLTER_EMBEDDED_MODEL_AUTH_HEADER: ${{ secrets.HOLTER_EMBEDDED_MODEL_AUTH_HEADER }}
+          HOLTER_EMBEDDED_MODEL_B64: ${{ secrets.HOLTER_EMBEDDED_MODEL_B64 }}
+        run: |
+          set -euo pipefail
+          MODEL_DIR="${RUNNER_TEMP}/holter-embed-model"
+          mkdir -p "$MODEL_DIR"
+          MODEL_PATH="${MODEL_DIR}/embedded_model.bin"
+
+          if [[ -n "${HOLTER_EMBEDDED_MODEL_URL:-}" ]]; then
+            echo "Primary path: HOLTER_EMBEDDED_MODEL_URL"
+            if [[ -n "${HOLTER_EMBEDDED_MODEL_AUTH_HEADER:-}" ]]; then
+              curl -fsSL \
+                -H "Authorization: ${HOLTER_EMBEDDED_MODEL_AUTH_HEADER}" \
+                -o "${MODEL_PATH}" \
+                "${HOLTER_EMBEDDED_MODEL_URL}"
+            else
+              curl -fsSL -o "${MODEL_PATH}" "${HOLTER_EMBEDDED_MODEL_URL}"
+            fi
+          elif [[ -n "${HOLTER_EMBEDDED_MODEL_B64:-}" ]]; then
+            echo "Secondary path: HOLTER_EMBEDDED_MODEL_B64 (dev/fixture; ~48KB secret limit)"
+            export MODEL_PATH
+            python3 -c '
+          import base64, os, sys
+          path = os.environ["MODEL_PATH"]
+          data = base64.b64decode(os.environ["HOLTER_EMBEDDED_MODEL_B64"], validate=False)
+          if not data:
+              sys.exit("HOLTER_EMBEDDED_MODEL_B64 decoded to empty bytes")
+          open(path, "wb").write(data)
+          print("Materialized embed model at %s (%d bytes)" % (path, len(data)))
+          '
+          else
+            echo "error: embed secrets missing — release packaging is fail-closed" >&2
+            exit 1
+          fi
+
+          if [[ ! -s "$MODEL_PATH" ]]; then
+            echo "error: materialized model missing or empty: ${MODEL_PATH}" >&2
+            exit 1
+          fi
+          SIZE=$(wc -c < "$MODEL_PATH" | tr -d ' ')
+          echo "Materialized embed model at ${MODEL_PATH} (${SIZE} bytes)"
+          echo "HOLTER_EMBEDDED_MODEL_PATH=${MODEL_PATH}" >> "$GITHUB_ENV"
+
+      - name: Release build (embedded-model, CPU, holter-http-api)
+        run: >
+          cargo build --release
+          --target ${{ matrix.target }}
+          --bin holter-http-api
+          --no-default-features
+          --features embedded-model
+
+      - name: Upload embedded HTTP API (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/holter-http-api
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload embedded HTTP API (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/holter-http-api.exe
+          if-no-files-found: error
+          retention-days: 90
+
+  # Guard: surface a clear failure when embed secrets are not configured.
+  require-embed-secrets:
+    name: require-embed-secrets
+    needs: resolve-version
+    if: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL == '' && secrets.HOLTER_EMBEDDED_MODEL_B64 == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail — embed secrets required for release packaging
+        run: |
+          echo "error: set HOLTER_EMBEDDED_MODEL_URL (preferred) or HOLTER_EMBEDDED_MODEL_B64" >&2
+          echo "Release packaging does not soft-skip like routine CI." >&2
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # Windows installer (Inno Setup) → Actions artifact
+  # ---------------------------------------------------------------------------
+  package-windows-installer:
+    name: package-windows-installer (windows-x86_64-cpu)
+    needs: [resolve-version, build-embedded-http-api]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Download embedded Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: release-embedded-http-api-windows-x86_64
+          path: ${{ runner.temp }}/release-embedded-http-api
+
+      - name: Resolve downloaded binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$(find "${RUNNER_TEMP}/release-embedded-http-api" -type f \( -name 'holter-http-api.exe' -o -name 'holter-http-api' \) | head -n1)"
+          if [[ -z "${BIN}" || ! -f "${BIN}" ]]; then
+            echo "error: release-embedded-http-api Windows binary missing" >&2
+            exit 1
+          fi
+          echo "HOLTER_PKG_BINARY=${BIN}" >> "$GITHUB_ENV"
+          echo "Using binary: ${BIN}"
+
+      - name: Install Inno Setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          choco install innosetup -y --no-progress
+
+      - name: Prepare staging and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash packaging/scripts/prepare-staging.sh \
+            --os windows \
+            --binary "${HOLTER_PKG_BINARY}"
+          bash packaging/scripts/verify-artifact.sh packaging/out/staging/windows
+
+      - name: Build Inno installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash packaging/scripts/build-inno.sh \
+            --version "${{ needs.resolve-version.outputs.version }}"
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-windows-installer-windows-x86_64-cpu
+          path: packaging/out/windows/*
+          if-no-files-found: error
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Docker image (linux/amd64 CPU) → gzipped docker save archive artifact
+  # ---------------------------------------------------------------------------
+  package-docker-image:
+    name: package-docker-image (linux-x86_64-cpu)
+    needs: [resolve-version, build-embedded-http-api]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Download embedded Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: release-embedded-http-api-linux-x86_64
+          path: ${{ runner.temp }}/release-embedded-http-api
+
+      - name: Resolve downloaded binary
+        run: |
+          set -euo pipefail
+          BIN="$(find "${RUNNER_TEMP}/release-embedded-http-api" -type f -name 'holter-http-api' | head -n1)"
+          if [[ -z "${BIN}" || ! -f "${BIN}" ]]; then
+            echo "error: release-embedded-http-api Linux binary missing" >&2
+            exit 1
+          fi
+          chmod +x "${BIN}"
+          echo "HOLTER_PKG_BINARY=${BIN}" >> "$GITHUB_ENV"
+          echo "Using binary: ${BIN}"
+
+      - name: Prepare staging and verify
+        run: |
+          set -euo pipefail
+          bash packaging/scripts/prepare-staging.sh \
+            --os linux \
+            --binary "${HOLTER_PKG_BINARY}"
+          bash packaging/scripts/verify-artifact.sh packaging/out/staging/linux
+
+      - name: Build and save Docker image (cpu)
+        run: |
+          set -euo pipefail
+          VER="${{ needs.resolve-version.outputs.version }}"
+          TAG="holter-http-api:${VER}-cpu"
+          bash packaging/scripts/build-docker.sh --tag "${TAG}"
+          mkdir -p packaging/out/docker
+          OUT="packaging/out/docker/holter-http-api-${VER}-linux-x86_64-cpu.tar.gz"
+          docker save "${TAG}" | gzip > "${OUT}"
+          ls -la packaging/out/docker/
+          echo "Saved ${OUT}"
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-docker-linux-x86_64-cpu
+          path: packaging/out/docker/*.tar.gz
+          if-no-files-found: error
+          retention-days: 90

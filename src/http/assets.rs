@@ -76,7 +76,7 @@ mod tests {
         let combined = format!("{html}\n{js}");
 
         for needle in [
-            "ヘルス確認",
+            "ヘルス",
             "解析",
             "ECL",
             "ダウンロード",
@@ -95,7 +95,33 @@ mod tests {
             "index.html must include a short Japanese guidance block"
         );
 
-        // Interactive controls for health / file / analyze / download / status regions.
+        // Layout: left ~1/3 input, right ~2/3 output (Bulma columns).
+        assert!(
+            html.contains("is-one-third") && html.contains("is-two-thirds"),
+            "index.html must use a ~1/3 + ~2/3 column layout"
+        );
+
+        // Health is auto-polled (no dedicated health button).
+        assert!(
+            !html.contains("id=\"health-btn\"") && !html.contains("id='health-btn'"),
+            "health must not use a click button; use top-right status + polling"
+        );
+        assert!(
+            js.contains("setInterval") && js.contains("10000"),
+            "console.js must poll /health every 10 seconds"
+        );
+
+        // JSON is the console default output format.
+        assert!(
+            html.contains("value=\"json\"") && html.contains("selected"),
+            "JSON must be the default selected output format"
+        );
+        assert!(
+            js.contains("\"json\"") || js.contains("'json'"),
+            "console.js must default analyze format to json"
+        );
+
+        // Interactive controls for file / analyze / download / status regions.
         assert!(
             html.contains("id=\"") || html.contains("id='"),
             "index.html must expose element ids for ConsoleClient JS"

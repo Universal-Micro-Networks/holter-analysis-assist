@@ -1,55 +1,107 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="ja" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Holter Analysis Assist コンソール</title>
+  <!-- Bulma: layout / forms without a SPA build -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
   <link rel="stylesheet" href="console.css">
 </head>
 <body>
-  <main class="console">
-    <header class="console__header">
-      <h1>Holter Analysis Assist コンソール</h1>
-      <p id="guidance" class="console__guidance">
-        この画面では、サービスの疎通確認（ヘルス確認）と ECL ファイルの単発解析ができます。
-        まずヘルス確認で到達を確かめ、ECL を選択してから解析を実行してください。
-        結果は画面に表示され、必要ならダウンロードできます。
+  <header class="console-topbar">
+    <div class="console-topbar__brand">
+      <h1 class="title is-4 mb-0">Holter Analysis Assist</h1>
+      <p class="console-topbar__sub">簡易コンソール — ECL の単発解析</p>
+    </div>
+    <div
+      id="health-status"
+      class="console-health"
+      role="status"
+      aria-live="polite"
+      title="10秒ごとに自動確認"
+    >
+      <span class="console-health__dot" aria-hidden="true"></span>
+      <span id="health-label">ヘルス確認中…</span>
+    </div>
+  </header>
+
+  <main class="section console-main pt-4">
+    <div class="container is-fluid">
+      <p id="guidance" class="console-guidance mb-4">
+        この画面の左で ECL を選び解析を実行し、右に結果が表示されます。
+        ヘルス状態は画面右上で自動更新されます（ボタン操作は不要です）。
       </p>
-    </header>
 
-    <section class="console__section" aria-labelledby="health-heading">
-      <h2 id="health-heading">ヘルス確認</h2>
-      <button type="button" id="health-btn">ヘルス確認</button>
-      <p id="health-status" class="console__status" role="status" aria-live="polite">未確認</p>
-    </section>
+      <div class="columns is-desktop is-variable is-4">
+        <!-- Left ~1/3: input -->
+        <div class="column is-one-third-desktop">
+          <div class="box console-panel">
+            <h2 class="title is-5">入力</h2>
 
-    <section class="console__section" aria-labelledby="analyze-heading">
-      <h2 id="analyze-heading">ECL 解析</h2>
-      <label for="ecl-file">ECL ファイルを選択</label>
-      <input type="file" id="ecl-file" name="ecl" accept=".ecl,application/octet-stream">
+            <div class="field">
+              <label class="label" for="ecl-file">ECL ファイルを選択</label>
+              <div class="control">
+                <div class="file has-name is-fullwidth">
+                  <label class="file-label">
+                    <input class="file-input" type="file" id="ecl-file" name="ecl" accept=".ecl,application/octet-stream">
+                    <span class="file-cta">
+                      <span class="file-label">ファイルを選択…</span>
+                    </span>
+                    <span class="file-name" id="ecl-filename">未選択</span>
+                  </label>
+                </div>
+              </div>
+            </div>
 
-      <label for="format-select">出力形式（任意）</label>
-      <select id="format-select">
-        <option value="">既定（サーバー設定に従う）</option>
-        <option value="csv">CSV</option>
-        <option value="json">JSON</option>
-      </select>
+            <div class="field">
+              <label class="label" for="format-select">出力形式</label>
+              <div class="control">
+                <div class="select is-fullwidth">
+                  <select id="format-select">
+                    <option value="json" selected>JSON（既定）</option>
+                    <option value="csv">CSV</option>
+                  </select>
+                </div>
+              </div>
+            </div>
 
-      <button type="button" id="analyze-btn">解析を実行</button>
-      <p id="loading" class="console__loading" hidden>処理中です。完了までお待ちください…</p>
-    </section>
+            <div class="field">
+              <div class="control">
+                <button type="button" class="button is-link is-fullwidth" id="analyze-btn">
+                  解析を実行
+                </button>
+              </div>
+            </div>
 
-    <section class="console__section" aria-labelledby="message-heading">
-      <h2 id="message-heading">メッセージ</h2>
-      <p id="error" class="console__error" role="alert" aria-live="assertive"></p>
-    </section>
+            <p id="loading" class="help is-info console-loading" hidden>
+              処理中です。完了までお待ちください…
+            </p>
 
-    <section class="console__section" aria-labelledby="result-heading">
-      <h2 id="result-heading">解析結果</h2>
-      <pre id="result" class="console__result" aria-live="polite"></pre>
-      <button type="button" id="download-btn" disabled>結果をダウンロード</button>
-    </section>
+            <div id="error" class="notification is-danger is-light mt-3" role="alert" aria-live="assertive" hidden></div>
+          </div>
+        </div>
+
+        <!-- Right ~2/3: output -->
+        <div class="column is-two-thirds-desktop">
+          <div class="box console-panel console-panel--output">
+            <div class="level is-mobile mb-3">
+              <div class="level-left">
+                <h2 class="title is-5 mb-0">出力</h2>
+              </div>
+              <div class="level-right">
+                <button type="button" class="button is-small is-outlined" id="download-btn" disabled>
+                  結果をダウンロード
+                </button>
+              </div>
+            </div>
+            <pre id="result" class="console-result" aria-live="polite"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
+
   <script src="console.js"></script>
 </body>
 </html>

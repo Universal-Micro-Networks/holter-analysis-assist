@@ -3,10 +3,12 @@
 
   var HEALTH_PATH = "/health";
   var ANALYZE_PATH = "/v1/analyze";
+  var HEALTH_POLL_MS = 10000;
 
-  var healthBtn = document.getElementById("health-btn");
   var healthStatus = document.getElementById("health-status");
+  var healthLabel = document.getElementById("health-label");
   var eclInput = document.getElementById("ecl-file");
+  var eclFilename = document.getElementById("ecl-filename");
   var formatSelect = document.getElementById("format-select");
   var analyzeBtn = document.getElementById("analyze-btn");
   var loadingEl = document.getElementById("loading");
@@ -16,22 +18,29 @@
 
   var lastResult = null;
   var busy = false;
+  var healthInFlight = false;
 
   function setBusy(isBusy) {
     busy = isBusy;
     loadingEl.hidden = !isBusy;
-    healthBtn.disabled = isBusy;
     analyzeBtn.disabled = isBusy;
     eclInput.disabled = isBusy;
     formatSelect.disabled = isBusy;
+    if (isBusy) {
+      analyzeBtn.classList.add("is-loading");
+    } else {
+      analyzeBtn.classList.remove("is-loading");
+    }
   }
 
   function clearError() {
     errorEl.textContent = "";
+    errorEl.hidden = true;
   }
 
   function showError(message) {
     errorEl.textContent = message;
+    errorEl.hidden = !message;
   }
 
   function clearResult() {
@@ -106,17 +115,28 @@
     return "text/plain";
   }
 
-  async function onHealth() {
-    clearError();
-    healthStatus.className = "console__status";
-    healthStatus.textContent = "確認中…";
-    setBusy(true);
+  function setHealthState(state, label) {
+    healthStatus.className = "console-health";
+    if (state === "ok") {
+      healthStatus.classList.add("is-ok");
+    } else if (state === "error") {
+      healthStatus.classList.add("is-error");
+    } else if (state === "pending") {
+      healthStatus.classList.add("is-pending");
+    }
+    healthLabel.textContent = label;
+  }
+
+  /** Background poll — does not toggle analyze busy state. */
+  async function pollHealth() {
+    if (healthInFlight) {
+      return;
+    }
+    healthInFlight = true;
     try {
       var res = await fetch(HEALTH_PATH, { method: "GET" });
       if (!res.ok) {
-        healthStatus.className = "console__status is-error";
-        healthStatus.textContent = "ヘルス確認に失敗しました（HTTP " + res.status + "）";
-        showError("ヘルス確認に失敗しました。サービスへ到達できないか、非成功応答が返されました。");
+        setHealthState("error", "ヘルス異常 HTTP " + res.status);
         return;
       }
       var text = await res.text();
@@ -128,20 +148,23 @@
         ok = false;
       }
       if (ok) {
-        healthStatus.className = "console__status is-ok";
-        healthStatus.textContent = "正常（status: ok）";
+        setHealthState("ok", "ヘルス正常");
       } else {
-        healthStatus.className = "console__status is-error";
-        healthStatus.textContent = "ヘルス確認に失敗しました（応答形式が想定外です）";
-        showError("ヘルス確認に失敗しました。応答を解釈できませんでした。");
+        setHealthState("error", "ヘルス応答異常");
       }
     } catch (err) {
-      healthStatus.className = "console__status is-error";
-      healthStatus.textContent = "ヘルス確認に失敗しました";
-      showError("ヘルス確認に失敗しました。サーバーに到達できません。");
+      setHealthState("error", "ヘルス未到達");
     } finally {
-      setBusy(false);
+      healthInFlight = false;
     }
+  }
+
+  function selectedFormat() {
+    var format = (formatSelect.value || "json").toLowerCase();
+    if (format !== "csv" && format !== "json") {
+      return "json";
+    }
+    return format;
   }
 
   async function onAnalyze() {
@@ -156,14 +179,22 @@
 
     var form = new FormData();
     form.append("ecl", file, file.name);
-    var format = formatSelect.value;
-    if (format) {
-      form.append("format", format);
-    }
+    // JSON is the console default; always send an explicit format.
+    form.append("format", selectedFormat());
 
     setBusy(true);
     try {
-      var res = await fetch(ANALYZE_PATH, { method: "POST", body: form });
+      var headers = {};
+      if (selectedFormat() === "json") {
+        headers.Accept = "application/json";
+      } else {
+        headers.Accept = "text/csv";
+      }
+      var res = await fetch(ANALYZE_PATH, {
+        method: "POST",
+        body: form,
+        headers: headers,
+      });
       var text = await res.text();
       if (!res.ok) {
         var detail = extractUpstreamError(text);
@@ -199,11 +230,9 @@
     URL.revokeObjectURL(url);
   }
 
-  healthBtn.addEventListener("click", function () {
-    if (busy) {
-      return;
-    }
-    onHealth();
+  eclInput.addEventListener("change", function () {
+    var file = eclInput.files && eclInput.files[0];
+    eclFilename.textContent = file ? file.name : "未選択";
   });
 
   analyzeBtn.addEventListener("click", function () {
@@ -214,4 +243,9 @@
   });
 
   downloadBtn.addEventListener("click", onDownload);
+
+  // Immediate health check, then every 10 seconds (no button).
+  setHealthState("pending", "ヘルス確認中…");
+  pollHealth();
+  setInterval(pollHealth, HEALTH_POLL_MS);
 })();

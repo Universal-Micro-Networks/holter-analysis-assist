@@ -1,143 +1,161 @@
+/* Console overrides on top of Bulma — calm clinical console look (no purple glow). */
+
 :root {
-  --bg: #f2f4f6;
-  --surface: #ffffff;
-  --ink: #1a2330;
-  --muted: #5a6573;
-  --line: #d5dde3;
-  --accent: #0b6e4f;
-  --accent-ink: #ffffff;
-  --danger: #9b1c1c;
-  --danger-bg: #fdecec;
-  --ok: #0b6e4f;
+  --console-ink: #1c2430;
+  --console-muted: #5c6b7a;
+  --console-line: #d7e0e8;
+  --console-bg: #eef2f5;
+  --console-surface: #ffffff;
+  --console-accent: #0f6b5c;
+  --console-ok: #1b7a4a;
+  --console-bad: #b42318;
+  --console-warn: #9a6700;
 }
 
-* {
-  box-sizing: border-box;
-}
-
+html,
 body {
-  margin: 0;
-  font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
-  color: var(--ink);
+  min-height: 100%;
   background:
-    radial-gradient(ellipse at top left, #e8eef2 0%, transparent 55%),
-    linear-gradient(180deg, #eef1f4 0%, var(--bg) 40%, #e7ebe8 100%);
-  min-height: 100vh;
+    radial-gradient(ellipse 80% 50% at 10% -10%, #dfe8ee 0%, transparent 55%),
+    linear-gradient(165deg, #f4f7f9 0%, var(--console-bg) 45%, #e8eee9 100%);
+  color: var(--console-ink);
 }
 
-.console {
-  max-width: 44rem;
-  margin: 0 auto;
-  padding: 2rem 1.25rem 3rem;
+.console-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--console-line);
+  background: color-mix(in srgb, var(--console-surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
 
-.console__header h1 {
-  margin: 0 0 0.75rem;
-  font-size: 1.6rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+.console-topbar__brand .title {
+  color: var(--console-ink);
+  letter-spacing: 0.01em;
 }
 
-.console__guidance {
-  margin: 0 0 1.75rem;
-  color: var(--muted);
+.console-topbar__sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: var(--console-muted);
+}
+
+/* Modest health chip — top right, no button */
+.console-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  max-width: 16rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--console-line);
+  background: #f7fafb;
+  color: var(--console-muted);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+.console-health__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #9aa7b5;
+  flex-shrink: 0;
+}
+
+.console-health.is-ok {
+  color: var(--console-ok);
+  border-color: color-mix(in srgb, var(--console-ok) 35%, var(--console-line));
+  background: color-mix(in srgb, var(--console-ok) 8%, #fff);
+}
+
+.console-health.is-ok .console-health__dot {
+  background: var(--console-ok);
+}
+
+.console-health.is-error {
+  color: var(--console-bad);
+  border-color: color-mix(in srgb, var(--console-bad) 35%, var(--console-line));
+  background: color-mix(in srgb, var(--console-bad) 8%, #fff);
+}
+
+.console-health.is-error .console-health__dot {
+  background: var(--console-bad);
+}
+
+.console-health.is-pending .console-health__dot {
+  background: var(--console-warn);
+}
+
+.console-main {
+  padding-top: 1rem;
+}
+
+.console-guidance {
+  color: var(--console-muted);
   line-height: 1.65;
+  max-width: 52rem;
 }
 
-.console__section {
-  background: var(--surface);
-  border: 1px solid #d7dde3;
-  padding: 1.1rem 1.2rem 1.25rem;
-  margin-bottom: 1rem;
+.console-panel {
+  height: 100%;
+  border: 1px solid var(--console-line);
+  box-shadow: none;
 }
 
-.console__section h2 {
-  margin: 0 0 0.85rem;
-  font-size: 1.05rem;
+.console-panel--output {
+  display: flex;
+  flex-direction: column;
+  min-height: 28rem;
 }
 
-label {
-  display: block;
-  margin: 0.65rem 0 0.35rem;
-  font-size: 0.92rem;
+.button.is-link {
+  background-color: var(--console-accent);
+  border-color: transparent;
 }
 
-input[type="file"],
-select,
-button {
-  font: inherit;
+.button.is-link:hover {
+  background-color: color-mix(in srgb, var(--console-accent) 88%, #000);
 }
 
-input[type="file"],
-select {
-  display: block;
-  width: 100%;
-  max-width: 28rem;
-  margin-bottom: 0.75rem;
-}
-
-button {
-  appearance: none;
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--accent-ink);
-  padding: 0.45rem 1rem;
-  cursor: pointer;
-}
-
-button:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-
-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.console__status {
-  margin: 0.75rem 0 0;
-  color: var(--muted);
-}
-
-.console__status.is-ok {
-  color: var(--ok);
+.console-loading {
   font-weight: 600;
 }
 
-.console__status.is-error {
-  color: var(--danger);
-  font-weight: 600;
-}
-
-.console__loading {
-  margin: 0.75rem 0 0;
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.console__error {
+.console-result {
+  flex: 1;
   margin: 0;
-  min-height: 1.4em;
-  color: var(--danger);
-  background: transparent;
-  white-space: pre-wrap;
-}
-
-.console__error:not(:empty) {
-  background: var(--danger-bg);
-  padding: 0.6rem 0.75rem;
-}
-
-.console__result {
-  margin: 0 0 0.85rem;
-  padding: 0.75rem;
-  min-height: 8rem;
-  max-height: 24rem;
+  padding: 0.9rem 1rem;
+  min-height: 22rem;
+  max-height: min(70vh, 40rem);
   overflow: auto;
-  background: #f7f9fb;
-  border: 1px solid #d7dde3;
+  background: #f6f8fa;
+  border: 1px solid var(--console-line);
+  border-radius: 6px;
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 0.82rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  color: var(--console-ink);
+}
+
+@media screen and (max-width: 1023px) {
+  .console-topbar {
+    flex-wrap: wrap;
+  }
+
+  .console-panel--output {
+    min-height: 18rem;
+  }
 }
