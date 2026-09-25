@@ -29,7 +29,7 @@
   - _Boundary: LicenseClient_
   - _Requirements: 6.1, 6.2, 6.3_
 
-- [ ] 3. Core: HTTP 実装とゲート API
+- [x] 3. Core: HTTP 実装とゲート API
 - [x] 3.1 (P) ライセンスサーバー向け HTTP アダプタを実装する
   - 設定の URL・パス・タイムアウト・任意 API キーで有効性確認と許可+計上を呼ぶ
   - 非許可・非成功応答・タイムアウト・輸送失敗をすべて失敗として返す
@@ -39,7 +39,7 @@
   - _Depends: 2.1, 2.2_
   - _Requirements: 1.1, 2.1, 7.1, 7.3, 8.1_
 
-- [ ] 3.2 (P) 起動時確認と推論時確認のゲート API と process-wide install を実装する
+- [x] 3.2 (P) 起動時確認と推論時確認のゲート API と process-wide install を実装する
   - 起動用ゲートは有効性確認のみ、推論用ゲートは許可+計上を行い、失敗時は続行しない
   - `install` / `global` / `try_global` を提供し、未 install 時の推論経路は fail-closed
   - オフライン継続や握りつぶし経路を設けない
