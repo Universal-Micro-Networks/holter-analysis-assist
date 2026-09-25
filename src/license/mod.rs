@@ -1,7 +1,9 @@
 //! License client domain: errors, config, HTTP port, and process-wide gate.
 //!
-//! Task 1.2 owns types only; config / client / HTTP / gate land in later tasks.
+//! Config loading lives in [`config`]; HTTP client / gate land in later tasks.
 
+mod config;
 mod types;
 
+pub use config::{LicenseConfig, SecretString};
 pub use types::{LicenseCheckResult, LicenseError, LicenseMeterResult};

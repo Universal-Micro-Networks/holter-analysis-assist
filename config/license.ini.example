@@ -1,0 +1,27 @@
+# Canonical [license] section sample — owned by the license-client specification.
+# Other features (http-api, packaging-distribution, etc.) MUST copy or reference
+# this file only and MUST NOT redefine [license] key names or meanings.
+#
+# Operational security (file permissions):
+#   Treat this file as secret-bearing when api_key is set.
+#   Restrict OS permissions so only the service owner can read it
+#   (example: chmod 600 on Unix / owner-only ACL on Windows).
+#
+# Copy to config/license.ini (or pass an explicit path) and edit values for each environment.
+
+[license]
+# Required. License server base URL (no trailing path for check/meter — those are separate keys).
+# Prefer https:// in production. http:// is allowed for local development only.
+server_url=https://license.example.com
+
+# Optional. Bearer token / API key for Authorization. Leave unset if the server does not require it.
+# api_key=replace-me
+
+# Optional. HTTP timeout in seconds for license requests. Default: 10
+# timeout_secs=10
+
+# Optional. Path appended to server_url for startup validity check. Default: /v1/license/check
+# check_path=/v1/license/check
+
+# Optional. Path appended to server_url for per-job authorize+meter. Default: /v1/license/meter
+# meter_path=/v1/license/meter
