@@ -120,6 +120,21 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
         provider: ProviderArg,
     },
+
+    /// Start the HTTP API + console UI (same as `holter-http-api`).
+    ///
+    /// Use this when Device Guard blocks `holter-http-api.exe`. Config must
+    /// contain both `[http]` and `[license]` (e.g. `config/http.ini`).
+    ServeHttp {
+        /// Path to ini containing `[http]` and `[license]` sections.
+        #[arg(
+            long = "config",
+            env = "HOLTER_HTTP_INI",
+            default_value = "config/http.ini",
+            value_name = "PATH"
+        )]
+        config: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -171,6 +186,18 @@ struct Thresholds {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // HTTP serve owns its own license install from the merged http ini — skip the
+    // CLI-default license.ini path so Gate is not installed twice.
+    if let Commands::ServeHttp { config } = &cli.command {
+        return match holter_analysis_assist::http::run_blocking(config) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     if let Err(err) = install_and_ensure_startup_licensed(&cli.license_config) {
         // StartupFailed / Config / install errors: identifiable; do not run subcommands.
         eprintln!("error: {err}");
@@ -178,6 +205,7 @@ fn main() -> ExitCode {
     }
 
     match cli.command {
+        Commands::ServeHttp { .. } => unreachable!("handled above"),
         Commands::Classify { input, format } => match classify_ecg(&input) {
             Ok(result) => {
                 print_classify(&result, format);

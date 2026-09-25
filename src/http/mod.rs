@@ -16,7 +16,9 @@ pub use error::{ErrorBody, ErrorDetail, HttpError};
 pub use handlers::{static_ui_router, AnalyzeHandler, HealthBody, HealthHandler, StaticUiHandler};
 pub use response::{AnalyzeJsonBody, AnalyzeSummaryJson, ResponseCodec};
 pub use routes::build_router;
-pub use startup::{install_and_ensure_startup_licensed, run, serve, StartupError};
+pub use startup::{
+    install_and_ensure_startup_licensed, run, run_blocking, serve, StartupError,
+};
 pub use state::{AppState, SharedModel};
 
 /// Returns true when the HTTP module is linked and callable from the binary.

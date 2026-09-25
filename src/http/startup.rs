@@ -39,6 +39,20 @@ pub fn install_and_ensure_startup_licensed(ini_path: &Path) -> Result<(), Licens
     LicenseGate::global().ensure_startup_licensed()
 }
 
+/// Sync entry for `holter-http-api` and CLI `serve-http`.
+///
+/// Installs the license gate (blocking), loads the resident model, then serves.
+/// Must be called **outside** an existing Tokio runtime.
+pub fn run_blocking(config_path: &Path) -> Result<(), StartupError> {
+    let http_config = HttpConfig::load_from_path(config_path)?;
+    install_and_ensure_startup_licensed(config_path)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(StartupError::Serve)?;
+    runtime.block_on(serve(http_config))
+}
+
 /// Full startup sequence (design HttpStartup):
 /// load `[http]` → install gate → `ensure_startup_licensed` → AppState → bind/serve.
 ///
