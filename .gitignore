@@ -42,6 +42,9 @@ resources/models/**
 resources/samples/
 output/
 
+# Packaging staging / build outputs (assembled samples, binaries, packages)
+packaging/out/
+
 __pycache__/
 *.py[cod]
 :memory:.ses

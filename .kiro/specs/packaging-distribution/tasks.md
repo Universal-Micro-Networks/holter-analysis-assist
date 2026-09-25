@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. Foundation: 配布共通資産と検証ゲートを用意する
-- [ ] 1.1 NOTICE 正本と配布用サンプル ini の取り込みを追加する
+- [x] 1.1 NOTICE 正本と配布用サンプル ini の取り込みを追加する
   - ORT 等の第三者告知を含む NOTICE 正本をリポジトリに置く
   - `[license]` は `config/license.ini.example`（license-client）をコピー／参照する。キー正本を本仕様で所有しない
   - `[http]` は http-api の example をコピー／参照する。必要ならパッケージ時に両ソースから単一ランタイム用サンプルへマージする

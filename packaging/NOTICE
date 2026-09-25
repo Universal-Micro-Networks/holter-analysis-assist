@@ -1,0 +1,50 @@
+THIRD PARTY SOFTWARE NOTICES AND INFORMATION
+=============================================
+
+This product redistributes or links components that incorporate third-party
+material. Do not translate or localize the notices below without preserving
+attribution.
+
+-----------------------------------------------------------------------------
+ONNX Runtime (ORT)
+-----------------------------------------------------------------------------
+
+This distribution may include or dynamically load ONNX Runtime (ORT) binaries
+and related native libraries used for inference (via the Rust `ort` crate and
+ONNX Runtime native artifacts).
+
+License: MIT License (Microsoft Corporation) and/or Apache License 2.0,
+depending on the ONNX Runtime build and redistribution package in use.
+See the ONNX Runtime project for the authoritative license texts:
+  https://github.com/microsoft/onnxruntime
+
+Third-party notices for ONNX Runtime and its dependencies (ThirdPartyNotices):
+  https://github.com/microsoft/onnxruntime/blob/main/ThirdPartyNotices.txt
+
+PLACEHOLDER — Full ThirdPartyNotices.txt is not vendored in this repository.
+Before a compliance-sensitive release, replace or append the complete ORT
+ThirdPartyNotices (and any additional native dependency notices required by
+the shipped ORT build) under this NOTICE file, or ship the full notices file
+alongside this NOTICE in every distribution artifact.
+
+Operators / introducers: this file (`packaging/NOTICE`) is the packaging
+canonical notice and is copied into each distribution staging tree and
+shipped artifact (container image, Windows installer, Linux packages).
+
+-----------------------------------------------------------------------------
+Rust crate: ort
+-----------------------------------------------------------------------------
+
+The `ort` crate (Apache-2.0 / MIT) wraps ONNX Runtime. See crate licenses:
+  https://crates.io/crates/ort
+  LICENSE-APACHE / LICENSE-MIT as published with the crate version in use
+  (this repository pins ort = 2.0.0-rc.13).
+
+-----------------------------------------------------------------------------
+Other Rust / OS dependencies
+-----------------------------------------------------------------------------
+
+Additional open-source crates and system libraries may be linked into
+`holter-http-api`. Their licenses are as declared by each dependency.
+This NOTICE focuses on ORT redistribution obligations; expand as needed
+when regenerating dependency attribution for a release.
