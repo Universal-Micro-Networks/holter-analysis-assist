@@ -3,6 +3,10 @@
 //! Task 1.1 exposes this module and the `holter-http-api` binary skeleton.
 //! Config, routes, handlers, and license-gated listen land in later tasks.
 
+pub mod config;
+
+pub use config::{HttpConfig, HttpConfigError};
+
 /// Returns true when the HTTP module is linked and callable from the binary.
 ///
 /// Used by the startup skeleton to prove library ↔ binary wiring without

@@ -1,0 +1,35 @@
+# Canonical [http] section sample — owned by the http-api specification.
+# Key names and meanings below are the OWN source for HTTP listen / limits.
+# Windows and Linux use the same key names.
+#
+# [license] is NOT redefined here. Use the upstream canonical sample:
+#   config/license.ini.example
+# Merge options for deployment:
+#   1. Append an [http] section to a copy of license.ini (keep [license] keys unchanged), or
+#   2. Keep separate files and pass each path to the HTTP / license loaders.
+# Do not invent alternate license key names (server_url, api_key, etc.).
+#
+# TLS / transport:
+#   This service listens plain HTTP (bind host:port). Terminate TLS at a reverse
+#   proxy (nginx, ALB, IIS ARR, etc.) in front of bind for production HTTPS.
+#
+# Copy to config/http.ini (or merge into your runtime ini) and edit values.
+
+[http]
+# Required. Listen address as host:port (e.g. 0.0.0.0:8080 or 127.0.0.1:8080).
+bind=0.0.0.0:8080
+
+# Optional. Max ECL request body size in bytes. Default: 536870912 (512 MiB).
+# max_body_bytes=536870912
+
+# Optional. End-to-end max processing time per analyze request, in seconds.
+# Default: 1800 (30 minutes).
+# request_timeout_secs=1800
+
+# Optional. Filesystem path to an ONNX model for non-embedded / dev builds.
+# When unset and the binary is built with embedded-model, the embedded model is used.
+# model_path=/path/to/phase2_rev1.onnx
+
+# Optional. ONNX Runtime execution provider. Default: auto (cuda then cpu).
+# Allowed: auto | cpu | cuda
+# provider=auto
