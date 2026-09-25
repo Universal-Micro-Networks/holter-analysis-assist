@@ -198,3 +198,136 @@ jobs:
           name: release-embedded-cli-windows-x86_64
           path: target/${{ matrix.target }}/release/holter-analysis-assist.exe
           if-no-files-found: error
+
+  release-embedded-http-api:
+    # -------------------------------------------------------------------------
+    # CiEmbedHttpRelease (http-api): embedded holter-http-api for Win/Linux
+    # x86_64. Same inject secrets as release-embedded-cli:
+    #   HOLTER_EMBEDDED_MODEL_URL          — Primary production-size ONNX URL
+    #                                        (GH secrets max ~48KB; B64 cannot
+    #                                        hold production ONNX).
+    #   HOLTER_EMBEDDED_MODEL_AUTH_HEADER  — Optional curl Authorization header.
+    #   HOLTER_EMBEDDED_MODEL_B64          — Secondary dev/fixture only (~48KB
+    #                                        GitHub Actions secret size limit).
+    # Soft-skip when neither URL nor B64 is set. Artifact family:
+    # release-embedded-http-api. Out of scope: distribution packaging steps;
+    # does not redefine release-embedded-cli (model-embedding OWN).
+    # -------------------------------------------------------------------------
+    name: release-embedded-http-api (${{ matrix.target }})
+    # Soft-skip when neither inject secret is configured (keeps CI green).
+    if: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL != '' || secrets.HOLTER_EMBEDDED_MODEL_B64 != '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: embed-http-${{ matrix.target }}
+
+      - name: Materialize model for embed inject
+        shell: bash
+        env:
+          HOLTER_EMBEDDED_MODEL_URL: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL }}
+          HOLTER_EMBEDDED_MODEL_AUTH_HEADER: ${{ secrets.HOLTER_EMBEDDED_MODEL_AUTH_HEADER }}
+          HOLTER_EMBEDDED_MODEL_B64: ${{ secrets.HOLTER_EMBEDDED_MODEL_B64 }}
+        run: |
+          set -euo pipefail
+          # Soft-skip documentation: when neither URL nor B64 is set at the repo
+          # level, the job-level if: skips this job entirely (CI stays green).
+          echo "Inject policy: primary=HOLTER_EMBEDDED_MODEL_URL (production-size);"
+          echo "  secondary=HOLTER_EMBEDDED_MODEL_B64 (dev/fixture only, GH secret max ~48KB)."
+          echo "  Soft-skip when neither secret is set (job if: URL OR B64)."
+
+          MODEL_DIR="${RUNNER_TEMP}/holter-embed-model"
+          mkdir -p "$MODEL_DIR"
+          MODEL_PATH="${MODEL_DIR}/embedded_model.bin"
+
+          if [[ -n "${HOLTER_EMBEDDED_MODEL_URL:-}" ]]; then
+            echo "Primary path: downloading model from HOLTER_EMBEDDED_MODEL_URL"
+            if [[ -n "${HOLTER_EMBEDDED_MODEL_AUTH_HEADER:-}" ]]; then
+              curl -fsSL \
+                -H "Authorization: ${HOLTER_EMBEDDED_MODEL_AUTH_HEADER}" \
+                -o "${MODEL_PATH}" \
+                "${HOLTER_EMBEDDED_MODEL_URL}"
+            else
+              curl -fsSL -o "${MODEL_PATH}" "${HOLTER_EMBEDDED_MODEL_URL}"
+            fi
+          elif [[ -n "${HOLTER_EMBEDDED_MODEL_B64:-}" ]]; then
+            echo "Secondary path: decoding HOLTER_EMBEDDED_MODEL_B64 (dev/fixture;"
+            echo "  GitHub Actions secret size limit ~48KB — not for production ONNX)"
+            export MODEL_PATH
+            python3 -c '
+          import base64, os, sys
+          path = os.environ["MODEL_PATH"]
+          data = base64.b64decode(os.environ["HOLTER_EMBEDDED_MODEL_B64"], validate=False)
+          if not data:
+              sys.exit("HOLTER_EMBEDDED_MODEL_B64 decoded to empty bytes")
+          open(path, "wb").write(data)
+          print("Materialized embed model at %s (%d bytes)" % (path, len(data)))
+          '
+          else
+            echo "Neither HOLTER_EMBEDDED_MODEL_URL nor HOLTER_EMBEDDED_MODEL_B64 is set;"
+            echo "soft-skip expected at job if: — failing closed if reached."
+            exit 1
+          fi
+
+          if [[ ! -s "$MODEL_PATH" ]]; then
+            echo "Materialized model file is missing or empty: ${MODEL_PATH}" >&2
+            exit 1
+          fi
+          SIZE=$(wc -c < "$MODEL_PATH" | tr -d ' ')
+          echo "Materialized embed model at ${MODEL_PATH} (${SIZE} bytes)"
+          echo "HOLTER_EMBEDDED_MODEL_PATH=${MODEL_PATH}" >> "$GITHUB_ENV"
+
+      - name: Release build (embedded-model, CPU, holter-http-api)
+        # --no-default-features avoids CUDA dylib requirements on GH runners.
+        # Distribution default for this artifact is CPU (design: CiEmbedHttpRelease).
+        run: cargo build --release --target ${{ matrix.target }} --bin holter-http-api --no-default-features --features embedded-model
+
+      - name: Log release binary size
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/holter-http-api"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            BIN="${BIN}.exe"
+          fi
+          SIZE=$(wc -c < "$BIN" | tr -d ' ')
+          echo "release-embedded-http-api binary size: ${SIZE} bytes"
+          # Never suppress / hide sizes even if >100MB
+          if (( SIZE > 104857600 )); then
+            echo "note: binary exceeds 100MiB (${SIZE} bytes); recorded without suppression"
+          fi
+
+      - name: Upload embedded HTTP API (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifact family: release-embedded-http-api (suffix for matrix uniqueness on upload-artifact@v4)
+          name: release-embedded-http-api-linux-x86_64
+          path: target/${{ matrix.target }}/release/holter-http-api
+          if-no-files-found: error
+
+      - name: Upload embedded HTTP API (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-embedded-http-api-windows-x86_64
+          path: target/${{ matrix.target }}/release/holter-http-api.exe
+          if-no-files-found: error

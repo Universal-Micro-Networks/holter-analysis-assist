@@ -50,7 +50,7 @@
   - _Depends: 2.1, 2.2_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 4.1, 4.4, 4.5, 7.2, 9.2_
 
-- [ ] 4. Integration: 起動ゲートとルーティング配線
+- [x] 4. Integration: 起動ゲートとルーティング配線
 - [x] 4.1 起動時ライセンス確認後にのみリッスンしルートを公開する
   - 設定読取 → `LicenseGate::install` → `ensure_startup_licensed` → 共有状態構築 → バインドの順で起動する（CLI と同一の process-wide install）
   - 起動確認失敗・設定不備時はポートを開かず、起動失敗として識別可能に終了する
@@ -62,7 +62,7 @@
   - _Depends: 1.1, 2.1, 2.2, 2.3, 3.1_
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 7.4, 8.2, 9.1, 9.3_
 
-- [ ] 4.2 CI ジョブ `release-embedded-http-api` で埋め込み HTTP バイナリを出す
+- [x] 4.2 CI ジョブ `release-embedded-http-api` で埋め込み HTTP バイナリを出す
   - `embedded-model` feature 付きで `holter-http-api` を Win/Linux 向けに release ビルドする
   - ジョブ／アーティファクト名を `release-embedded-http-api` とし、下流 packaging-distribution の入力とする
   - 生モデル（`.onnx` 等）を artifact に含めない。`release-embedded-cli` は変更しない
