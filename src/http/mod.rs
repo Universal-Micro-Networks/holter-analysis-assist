@@ -7,11 +7,13 @@ pub mod config;
 pub mod error;
 pub mod handlers;
 pub mod response;
+pub mod state;
 
 pub use config::{HttpConfig, HttpConfigError};
 pub use error::{ErrorBody, ErrorDetail, HttpError};
-pub use handlers::{HealthBody, HealthHandler};
+pub use handlers::{AnalyzeHandler, HealthBody, HealthHandler};
 pub use response::{AnalyzeJsonBody, AnalyzeSummaryJson, ResponseCodec};
+pub use state::AppState;
 
 /// Returns true when the HTTP module is linked and callable from the binary.
 ///

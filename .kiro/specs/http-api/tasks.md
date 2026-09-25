@@ -36,8 +36,8 @@
   - _Boundary: HealthHandler_
   - _Requirements: 5.1, 5.2, 5.3_
 
-- [ ] 3. Core: 解析 HTTP アダプタ
-- [ ] 3.1 ECL 解析リクエストを正本ライブラリ入口へ委譲する
+- [x] 3. Core: 解析 HTTP アダプタ
+- [x] 3.1 ECL 解析リクエストを正本ライブラリ入口へ委譲する
   - multipart 等で ECL を受け取り、ビジネスロジックをアダプタに複製せず **正本 `analyze_ecl_with_source` のみ**を呼ぶ（並列 gated 入口を作らない）
   - 埋め込みモデルまたは設定上のパス指定モデルを上流の `ModelSource` 契約で選び、契約を再定義しない
   - AppState は ModelSource／制限値等を保持してよいが、analyze 用の別 `LicenseGate` を所有しない（meter は正本入口の global gate）
