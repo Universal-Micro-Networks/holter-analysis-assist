@@ -63,6 +63,22 @@ fn assert_common_operator_content(body: &str, path_label: &str) {
             || body.contains("範囲外"),
         "{path_label}: must defer API/license-server details upstream; got:\n{body}"
     );
+
+    // Existing Spec Update / Req 9.4: console UI /ui/ on same binary (api-console-ui).
+    assert!(
+        body.contains("/ui/"),
+        "{path_label}: must document console UI canonical URL /ui/; got:\n{body}"
+    );
+    assert!(
+        body.contains("同一")
+            && (body.contains("バイナリ") || lower.contains("binary") || body.contains(".exe")),
+        "{path_label}: must state console is delivered from the same HTTP binary; got:\n{body}"
+    );
+    assert!(
+        body.contains("追加")
+            && (body.contains("フロント") || lower.contains("frontend") || body.contains("別 UI")),
+        "{path_label}: must state no extra frontend artifact / UI server is required; got:\n{body}"
+    );
 }
 
 #[test]

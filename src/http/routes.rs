@@ -233,4 +233,73 @@ mod tests {
             });
         });
     }
+
+    /// Task 4.1 / Requirements 1.1, 1.3, 2.2, 6.1–6.3:
+    /// `/ui/` success, missing asset 404, health no meter, analyze meters once after UI,
+    /// health/analyze regression on the full router.
+    #[test]
+    fn console_delivery_and_api_coexistence_validation() {
+        with_gate(|meter_calls| {
+            block_on(async {
+                let app = build_router(test_state());
+
+                // `/ui/` success (HTML)
+                let ui = oneshot_get(&app, "/ui/").await;
+                assert_eq!(ui.status(), StatusCode::OK, "/ui/ must succeed");
+                let ui_ct = ui
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert!(
+                    ui_ct.starts_with("text/html"),
+                    "/ui/ Content-Type must be text/html, got {ui_ct}"
+                );
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    0,
+                    "static UI delivery must not meter"
+                );
+
+                // Missing asset → 404 (still no meter)
+                let missing = oneshot_get(&app, "/ui/does-not-exist.xyz").await;
+                assert_eq!(
+                    missing.status(),
+                    StatusCode::NOT_FOUND,
+                    "missing console asset must be 404"
+                );
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    0,
+                    "404 asset path must not meter"
+                );
+
+                // Health regression + no meter
+                let health = oneshot_get(&app, "/health").await;
+                assert_eq!(health.status(), StatusCode::OK, "/health regression");
+                let health_bytes = to_bytes(health.into_body(), 1024).await.expect("health body");
+                let health_json: Value =
+                    serde_json::from_slice(&health_bytes).expect("health json");
+                assert_eq!(health_json["status"], "ok");
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    0,
+                    "health must not meter"
+                );
+
+                // After UI (+ health), one analyze → exactly one meter
+                let analyze = oneshot_analyze(app).await;
+                assert_ne!(
+                    analyze.status(),
+                    StatusCode::NOT_FOUND,
+                    "/v1/analyze regression: must remain reachable"
+                );
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    1,
+                    "exactly one meter after UI + health + one analyze"
+                );
+            });
+        });
+    }
 }

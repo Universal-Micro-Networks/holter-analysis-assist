@@ -72,6 +72,13 @@ holter-http-api --config /etc/holter-http-api/http.ini
 
 systemd ユニット同梱は本仕様の必須ではありません。常駐化は運用側の方針に従ってください。API 契約の詳細は上流 `http-api` を参照してください。
 
+## コンソール UI（同一バイナリ）
+
+上流 `api-console-ui` により、簡易コンソールは **同一の `holter-http-api` バイナリに埋め込み配信**されます。追加のフロントエンド成果物や別 UI サーバーは不要です。
+
+- **正本 URL**: `http://<host>:<port>/ui/`（例: `http://127.0.0.1:8080/ui/`。Windows と同一経路）
+- ブラウザ手動スモーク: [../console-ui-smoke.md](../console-ui-smoke.md)
+
 ## 関連
 
 - 手動スモーク観点（CI 必須外）: [manual-smoke.md](./manual-smoke.md)

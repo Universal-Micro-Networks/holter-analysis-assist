@@ -62,6 +62,13 @@ docker run --rm \
 
 起動後、上流 `http-api` のヘルス／解析エンドポイント契約に従って疎通確認してください（契約の詳細は上流ドキュメント）。
 
+## コンソール UI（同一バイナリ）
+
+上流 `api-console-ui` により、簡易コンソールは **同一の `holter-http-api` バイナリに埋め込み配信**されます。追加のフロントエンド成果物や別 UI サーバーは不要です。
+
+- **正本 URL**: `http://<host>:<port>/ui/`（例: `http://localhost:8080/ui/`。Windows／Linux 同一経路）
+- ブラウザ手動スモーク: [../console-ui-smoke.md](../console-ui-smoke.md)
+
 ## 関連
 
 - 手動スモーク観点（CI 必須外）: [manual-smoke.md](./manual-smoke.md)

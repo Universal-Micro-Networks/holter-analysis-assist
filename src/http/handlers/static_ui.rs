@@ -2,6 +2,9 @@
 //!
 //! Design component: StaticUiHandler.
 //! Mounted into [`crate::http::routes::build_router`] via [`static_ui_router`].
+//!
+//! Browser manual smoke (not CI-required): `docs/console-ui-smoke.md`
+//! — health success display, unselected-file error, small-input analyze → view → download.
 
 use crate::http::assets::EmbeddedConsoleAssets;
 use axum::extract::Path;

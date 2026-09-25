@@ -60,4 +60,14 @@ fn manual_smoke_notes_exist_and_list_operator_checkpoints() {
             && (body.contains("起動") || lower.contains("start") || lower.contains("run")),
         "manual-smoke.md must cover start after ini configuration; got:\n{body}"
     );
+
+    // packaging-distribution task 5.1 / Req 9.4: console UI /ui/ on same binary.
+    assert!(
+        body.contains("/ui/"),
+        "manual-smoke.md must document console UI URL /ui/; got:\n{body}"
+    );
+    assert!(
+        body.contains("同一") && body.contains("バイナリ"),
+        "manual-smoke.md must state console is embedded in the same HTTP binary; got:\n{body}"
+    );
 }

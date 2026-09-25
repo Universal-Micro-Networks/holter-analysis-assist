@@ -58,8 +58,8 @@
 
 ### Phase 2 — 簡易 UI
 
-- [ ] api-console-ui -- API 疎通・単発解析用の簡易ブラウザ UI（同一バイナリ＋静的 HTML/JS。SPA なし）。Dependencies: http-api
+- [x] api-console-ui -- API 疎通・単発解析用の簡易ブラウザ UI（同一バイナリ＋静的 HTML/JS。SPA なし）。Dependencies: http-api
 
 ## Existing Spec Updates
 
-- [ ] packaging-distribution -- `api-console-ui` アセット／ルートを配布成果物に同梱するよう追記。Dependencies: api-console-ui
+- [x] packaging-distribution -- `api-console-ui` アセット／ルートを配布成果物に同梱するよう追記。Dependencies: api-console-ui
