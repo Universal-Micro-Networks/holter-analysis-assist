@@ -17,6 +17,10 @@ pub struct LicenseGate {
 
 static GLOBAL_GATE: Mutex<Option<&'static LicenseGate>> = Mutex::new(None);
 
+/// Serializes tests that mutate the process-wide gate (shared across modules).
+#[cfg(test)]
+pub(crate) static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 impl LicenseGate {
     /// Build a gate around an owned client (mock or HTTP adapter).
     pub fn new(client: impl LicenseClient + 'static) -> Self {
@@ -83,8 +87,8 @@ impl LicenseGate {
 
 #[cfg(test)]
 impl LicenseGate {
-    /// Clear the process-wide slot (tests only; serializes via caller mutex).
-    fn clear_for_test() {
+    /// Clear the process-wide slot (tests only; serializes via [`GLOBAL_TEST_LOCK`]).
+    pub(crate) fn clear_for_test() {
         match GLOBAL_GATE.lock() {
             Ok(mut slot) => *slot = None,
             Err(poisoned) => *poisoned.into_inner() = None,
@@ -98,13 +102,12 @@ mod tests {
     use crate::license::client::{LicenseClient, MockLicenseClient, MockOutcome};
     use crate::license::types::{LicenseCheckResult, LicenseError, LicenseMeterResult};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    /// Serializes tests that mutate the process-wide gate.
-    static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::Arc;
 
     fn with_clean_global(f: impl FnOnce()) {
-        let _guard = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         LicenseGate::clear_for_test();
         f();
         LicenseGate::clear_for_test();

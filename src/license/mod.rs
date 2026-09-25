@@ -15,3 +15,6 @@ pub use config::{LicenseConfig, SecretString};
 pub use gate::LicenseGate;
 pub use http::ReqwestLicenseClient;
 pub use types::{LicenseCheckResult, LicenseError, LicenseMeterResult};
+
+#[cfg(test)]
+pub(crate) use gate::GLOBAL_TEST_LOCK;

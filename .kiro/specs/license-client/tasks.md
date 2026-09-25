@@ -49,7 +49,7 @@
   - _Requirements: 1.2, 1.3, 2.2, 2.3, 5.1, 5.2, 5.3, 8.1, 8.2, 9.1, 9.2, 9.3_
 
 - [ ] 4. Integration: 解析入口とプロセス起動への配線
-- [ ] 4.1 正本入口 `analyze_ecl_with_source` で許可確認と利用計上を 1 回だけ行う
+- [x] 4.1 正本入口 `analyze_ecl_with_source` で許可確認と利用計上を 1 回だけ行う
   - model-embedding による `ModelSource` 配線の後に、本仕様が `src/analyze.rs` へゲートを挿入する
   - meter / `ensure_inference_allowed` は正本入口先頭のみ。`analyze_ecl` / `analyze_ecl_with_limit` には追加しない（二重計上禁止）
   - Gate は `global` / `try_global` で取得（解析シグネチャに Gate 引数を足さない）

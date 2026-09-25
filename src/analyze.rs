@@ -28,6 +28,8 @@ pub enum AnalyzeError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Csv(#[from] csv::Error),
+    #[error(transparent)]
+    License(#[from] crate::license::LicenseError),
 }
 
 #[derive(Debug, Serialize)]
@@ -84,7 +86,7 @@ pub fn analyze_ecl_with_limit(
 
 /// Canonical ECL analysis entry: load the model via [`ModelSource`], then run the pipeline.
 ///
-/// License metering is intentionally not applied here (`license-client` owns that).
+/// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
 pub fn analyze_ecl_with_source(
     ecl_path: &Path,
     model: &ModelSource,
@@ -92,6 +94,19 @@ pub fn analyze_ecl_with_source(
     max_windows: Option<usize>,
     provider: ExecutionProviderKind,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    // Fail-closed: uninstalled gate or meter deny rejects before any analyze output.
+    match crate::license::LicenseGate::try_global() {
+        None => {
+            return Err(crate::license::LicenseError::InferenceDenied(
+                "license gate not installed".into(),
+            )
+            .into());
+        }
+        Some(gate) => {
+            gate.ensure_inference_allowed()?;
+        }
+    }
+
     let source_info = parse_ecl_filename(ecl_path)?;
     // Fail-fast on model source before reading the full ECL (Path missing / Embedded unavailable).
     let mut model = Phase2Model::load_from_source(model, provider)?;
@@ -272,9 +287,15 @@ fn format_beat_time(t: NaiveDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::license::{
+        LicenseCheckResult, LicenseClient, LicenseError, LicenseGate, LicenseMeterResult,
+        MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
+    };
     use crate::model_source::ModelSource;
     use crate::phase2::InferError;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     /// Valid filename shape so preprocess filename parse succeeds; file need not exist
@@ -289,126 +310,343 @@ mod tests {
         (dir, csv)
     }
 
+    fn with_clean_global(f: impl FnOnce()) {
+        let _guard = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        LicenseGate::clear_for_test();
+        f();
+        LicenseGate::clear_for_test();
+    }
+
+    fn install_allow_gate() {
+        LicenseGate::install(LicenseGate::new(MockLicenseClient::new(
+            MockOutcome::Success { message: None },
+            MockOutcome::Success { message: None },
+        )))
+        .expect("install allow gate");
+    }
+
+    /// Counts meter calls to prove single authorize_and_meter at the canonical entry.
+    struct CountingMeterClient {
+        inner: MockLicenseClient,
+        meter_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingMeterClient {
+        fn allow(meter_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                inner: MockLicenseClient::new(
+                    MockOutcome::Success { message: None },
+                    MockOutcome::Success { message: None },
+                ),
+                meter_calls,
+            }
+        }
+    }
+
+    impl LicenseClient for CountingMeterClient {
+        fn check_validity(&self) -> Result<LicenseCheckResult, LicenseError> {
+            self.inner.check_validity()
+        }
+
+        fn authorize_and_meter(&self) -> Result<LicenseMeterResult, LicenseError> {
+            self.meter_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.authorize_and_meter()
+        }
+    }
+
     #[test]
     fn analyze_ecl_with_source_missing_path_errors_before_ecl_read() {
-        let (_dir, csv) = temp_csv();
-        let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1.onnx");
-        let source = ModelSource::Path(missing.clone());
-        let err = analyze_ecl_with_source(
-            &stub_ecl_path(),
-            &source,
-            &csv,
-            Some(0),
-            ExecutionProviderKind::Cpu,
-        )
-        .expect_err("missing model path must fail");
-        match err {
-            AnalyzeError::Infer(InferError::ModelNotFound(p)) => {
-                assert!(
-                    p.contains(missing.to_string_lossy().as_ref()) || p.contains("not found"),
-                    "error should identify missing path: {p}"
-                );
+        with_clean_global(|| {
+            install_allow_gate();
+            let (_dir, csv) = temp_csv();
+            let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1.onnx");
+            let source = ModelSource::Path(missing.clone());
+            let err = analyze_ecl_with_source(
+                &stub_ecl_path(),
+                &source,
+                &csv,
+                Some(0),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect_err("missing model path must fail");
+            match err {
+                AnalyzeError::Infer(InferError::ModelNotFound(p)) => {
+                    assert!(
+                        p.contains(missing.to_string_lossy().as_ref()) || p.contains("not found"),
+                        "error should identify missing path: {p}"
+                    );
+                }
+                other => panic!("expected Infer(ModelNotFound), got {other}"),
             }
-            other => panic!("expected Infer(ModelNotFound), got {other}"),
-        }
-        assert!(!csv.exists(), "must not write CSV when model load fails");
+            assert!(!csv.exists(), "must not write CSV when model load fails");
+        });
     }
 
     #[test]
     fn analyze_ecl_with_limit_wrapper_delegates_path_source() {
-        let (_dir, csv) = temp_csv();
-        let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1-wrap.onnx");
-        let err = analyze_ecl_with_limit(
-            &stub_ecl_path(),
-            &missing,
-            &csv,
-            Some(0),
-            ExecutionProviderKind::Cpu,
-        )
-        .expect_err("wrapper must surface missing Path via ModelSource");
-        assert!(
-            matches!(err, AnalyzeError::Infer(InferError::ModelNotFound(_))),
-            "wrapper should load via ModelSource::Path: {err}"
-        );
+        with_clean_global(|| {
+            install_allow_gate();
+            let (_dir, csv) = temp_csv();
+            let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1-wrap.onnx");
+            let err = analyze_ecl_with_limit(
+                &stub_ecl_path(),
+                &missing,
+                &csv,
+                Some(0),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect_err("wrapper must surface missing Path via ModelSource");
+            assert!(
+                matches!(err, AnalyzeError::Infer(InferError::ModelNotFound(_))),
+                "wrapper should load via ModelSource::Path: {err}"
+            );
+        });
     }
 
     #[cfg(not(feature = "embedded-model"))]
     #[test]
     fn analyze_ecl_with_source_embedded_rejected_without_feature() {
-        let (_dir, csv) = temp_csv();
-        let err = analyze_ecl_with_source(
-            &stub_ecl_path(),
-            &ModelSource::Embedded,
-            &csv,
-            Some(0),
-            ExecutionProviderKind::Cpu,
-        )
-        .expect_err("Embedded without feature must fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("embedded-model") || msg.contains("Embedded"),
-            "must clearly reject Embedded without feature: {msg}"
-        );
-        assert!(!csv.exists());
+        with_clean_global(|| {
+            install_allow_gate();
+            let (_dir, csv) = temp_csv();
+            let err = analyze_ecl_with_source(
+                &stub_ecl_path(),
+                &ModelSource::Embedded,
+                &csv,
+                Some(0),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect_err("Embedded without feature must fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("embedded-model") || msg.contains("Embedded"),
+                "must clearly reject Embedded without feature: {msg}"
+            );
+            assert!(!csv.exists());
+        });
     }
 
     #[test]
     fn analyze_ecl_with_source_path_smoke_optional() {
-        let sample_link = Path::new("resources/samples/sample.ecl");
-        let onnx = Path::new("resources/models/phase2_rev1.onnx");
-        if !sample_link.exists() || !onnx.exists() {
-            eprintln!("skip: sample.ecl or ONNX not present");
-            return;
-        }
-        // Symlink basename is `sample.ecl`; resolve to the real file whose name matches ECL rules.
-        let sample = match sample_link.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("skip: cannot canonicalize sample.ecl: {e}");
+        with_clean_global(|| {
+            install_allow_gate();
+            let sample_link = Path::new("resources/samples/sample.ecl");
+            let onnx = Path::new("resources/models/phase2_rev1.onnx");
+            if !sample_link.exists() || !onnx.exists() {
+                eprintln!("skip: sample.ecl or ONNX not present");
                 return;
             }
-        };
-        let (_dir, csv) = temp_csv();
-        let source = ModelSource::Path(onnx.to_path_buf());
-        let (rows, summary) = analyze_ecl_with_source(
-            &sample,
-            &source,
-            &csv,
-            Some(1),
-            ExecutionProviderKind::Cpu,
-        )
-        .expect("path source analyze with 1 window");
-        assert_eq!(summary.windows, 1);
-        assert!(csv.exists());
-        assert_eq!(rows.len(), summary.beats);
+            // Symlink basename is `sample.ecl`; resolve to the real file whose name matches ECL rules.
+            let sample = match sample_link.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("skip: cannot canonicalize sample.ecl: {e}");
+                    return;
+                }
+            };
+            let (_dir, csv) = temp_csv();
+            let source = ModelSource::Path(onnx.to_path_buf());
+            let (rows, summary) = analyze_ecl_with_source(
+                &sample,
+                &source,
+                &csv,
+                Some(1),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect("path source analyze with 1 window");
+            assert_eq!(summary.windows, 1);
+            assert!(csv.exists());
+            assert_eq!(rows.len(), summary.beats);
+        });
     }
 
     #[cfg(feature = "embedded-model")]
     #[test]
     fn analyze_ecl_with_source_embedded_smoke_optional() {
-        let sample_link = Path::new("resources/samples/sample.ecl");
-        if !sample_link.exists() {
-            eprintln!("skip: sample.ecl not present");
-            return;
-        }
-        let sample = match sample_link.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("skip: cannot canonicalize sample.ecl: {e}");
+        with_clean_global(|| {
+            install_allow_gate();
+            let sample_link = Path::new("resources/samples/sample.ecl");
+            if !sample_link.exists() {
+                eprintln!("skip: sample.ecl not present");
                 return;
             }
-        };
-        let (_dir, csv) = temp_csv();
-        let (rows, summary) = analyze_ecl_with_source(
-            &sample,
-            &ModelSource::Embedded,
-            &csv,
-            Some(1),
-            ExecutionProviderKind::Cpu,
-        )
-        .expect("embedded source analyze without external model path");
-        assert_eq!(summary.windows, 1);
-        assert!(csv.exists());
-        assert_eq!(rows.len(), summary.beats);
+            let sample = match sample_link.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("skip: cannot canonicalize sample.ecl: {e}");
+                    return;
+                }
+            };
+            let (_dir, csv) = temp_csv();
+            let (rows, summary) = analyze_ecl_with_source(
+                &sample,
+                &ModelSource::Embedded,
+                &csv,
+                Some(1),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect("embedded source analyze without external model path");
+            assert_eq!(summary.windows, 1);
+            assert!(csv.exists());
+            assert_eq!(rows.len(), summary.beats);
+        });
+    }
+
+    // --- License gate at canonical analyze entry (task 4.1) ---
+
+    #[test]
+    fn analyze_ecl_with_source_uninstalled_gate_fail_closed_no_output() {
+        with_clean_global(|| {
+            let (_dir, csv) = temp_csv();
+            let missing = PathBuf::from("/tmp/holter-assist-missing-license-uninstalled.onnx");
+            let err = analyze_ecl_with_source(
+                &stub_ecl_path(),
+                &ModelSource::Path(missing),
+                &csv,
+                Some(0),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect_err("uninstalled gate must fail-closed");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("inference denied"),
+                "must surface inference denial: {msg}"
+            );
+            assert!(
+                matches!(err, AnalyzeError::License(LicenseError::InferenceDenied(_))),
+                "expected License(InferenceDenied), got {err:?}"
+            );
+            assert!(!csv.exists(), "must not write CSV when gate missing");
+        });
+    }
+
+    #[test]
+    fn analyze_ecl_with_source_meter_deny_no_output_or_rows() {
+        with_clean_global(|| {
+            LicenseGate::install(LicenseGate::new(MockLicenseClient::new(
+                MockOutcome::Success { message: None },
+                MockOutcome::Deny {
+                    message: Some("quota exceeded".into()),
+                },
+            )))
+            .expect("install deny gate");
+
+            let (_dir, csv) = temp_csv();
+            let missing = PathBuf::from("/tmp/holter-assist-missing-license-deny.onnx");
+            let err = analyze_ecl_with_source(
+                &stub_ecl_path(),
+                &ModelSource::Path(missing),
+                &csv,
+                Some(2),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect_err("meter deny must reject inference");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("inference denied") && msg.contains("quota exceeded"),
+                "must identify inference denial: {msg}"
+            );
+            assert!(
+                matches!(err, AnalyzeError::License(LicenseError::InferenceDenied(_))),
+                "expected License(InferenceDenied), got {err:?}"
+            );
+            assert!(!csv.exists(), "must not write CSV on meter deny");
+        });
+    }
+
+    #[test]
+    fn analyze_ecl_with_source_meters_once_even_with_multiple_windows() {
+        with_clean_global(|| {
+            let meter_calls = Arc::new(AtomicUsize::new(0));
+            LicenseGate::install(LicenseGate::new(CountingMeterClient::allow(Arc::clone(
+                &meter_calls,
+            ))))
+            .expect("install counting gate");
+
+            let sample_link = Path::new("resources/samples/sample.ecl");
+            let onnx = Path::new("resources/models/phase2_rev1.onnx");
+            if !sample_link.exists() || !onnx.exists() {
+                // Still prove the entry meters once before model load (no window loop).
+                let (_dir, csv) = temp_csv();
+                let missing = PathBuf::from("/tmp/holter-assist-missing-license-multi-win.onnx");
+                let _ = analyze_ecl_with_source(
+                    &stub_ecl_path(),
+                    &ModelSource::Path(missing),
+                    &csv,
+                    Some(3),
+                    ExecutionProviderKind::Cpu,
+                );
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    1,
+                    "canonical entry must meter once before model/window work"
+                );
+                return;
+            }
+            let sample = sample_link
+                .canonicalize()
+                .expect("canonicalize sample.ecl");
+            let (_dir, csv) = temp_csv();
+            let (rows, summary) = analyze_ecl_with_source(
+                &sample,
+                &ModelSource::Path(onnx.to_path_buf()),
+                &csv,
+                Some(2),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect("meter success should allow analyze");
+            assert_eq!(summary.windows, 2, "exercise multiple windows");
+            assert!(csv.exists());
+            assert!(!rows.is_empty() || summary.beats == 0);
+            assert_eq!(
+                meter_calls.load(Ordering::SeqCst),
+                1,
+                "multiple windows must not re-meter"
+            );
+        });
+    }
+
+    #[test]
+    fn analyze_ecl_wrappers_do_not_double_meter() {
+        with_clean_global(|| {
+            let meter_calls = Arc::new(AtomicUsize::new(0));
+            LicenseGate::install(LicenseGate::new(CountingMeterClient::allow(Arc::clone(
+                &meter_calls,
+            ))))
+            .expect("install counting gate");
+
+            let (_dir, csv) = temp_csv();
+            let missing = PathBuf::from("/tmp/holter-assist-missing-license-wrapper.onnx");
+            let err = analyze_ecl_with_limit(
+                &stub_ecl_path(),
+                &missing,
+                &csv,
+                Some(2),
+                ExecutionProviderKind::Cpu,
+            )
+            .expect_err("missing model after meter");
+            assert!(
+                matches!(err, AnalyzeError::Infer(InferError::ModelNotFound(_))),
+                "wrapper should reach model load after single meter: {err}"
+            );
+            assert_eq!(
+                meter_calls.load(Ordering::SeqCst),
+                1,
+                "wrappers must not add a second meter"
+            );
+
+            // Second call via analyze_ecl must also meter exactly once more (fresh job).
+            let (_dir2, csv2) = temp_csv();
+            let _ = analyze_ecl(
+                &stub_ecl_path(),
+                &PathBuf::from("/tmp/holter-assist-missing-license-wrapper2.onnx"),
+                &csv2,
+            );
+            assert_eq!(
+                meter_calls.load(Ordering::SeqCst),
+                2,
+                "each job meters once; wrappers must not double within a job"
+            );
+        });
     }
 }
