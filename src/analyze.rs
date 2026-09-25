@@ -1,5 +1,6 @@
 //! End-to-end ECL analysis pipeline (BeatSense `analyzer.py` Rust port).
 
+use crate::model_source::ModelSource;
 use crate::phase2::{ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
 use crate::postprocess::{
     build_rhythm_intervals, build_unknown_intervals, center_best_beats, classify_event_sigmoid,
@@ -49,14 +50,22 @@ pub struct AnalyzeSummary {
     pub windows: usize,
 }
 
+/// Path-only compatibility wrapper → [`ModelSource::Path`] → [`analyze_ecl_with_source`].
 pub fn analyze_ecl(
     ecl_path: &Path,
     onnx_path: &Path,
     output_csv: &Path,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
-    analyze_ecl_with_limit(ecl_path, onnx_path, output_csv, None, ExecutionProviderKind::Auto)
+    analyze_ecl_with_source(
+        ecl_path,
+        &ModelSource::Path(onnx_path.to_path_buf()),
+        output_csv,
+        None,
+        ExecutionProviderKind::Auto,
+    )
 }
 
+/// Path-only compatibility wrapper → [`ModelSource::Path`] → [`analyze_ecl_with_source`].
 pub fn analyze_ecl_with_limit(
     ecl_path: &Path,
     onnx_path: &Path,
@@ -64,7 +73,29 @@ pub fn analyze_ecl_with_limit(
     max_windows: Option<usize>,
     provider: ExecutionProviderKind,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    analyze_ecl_with_source(
+        ecl_path,
+        &ModelSource::Path(onnx_path.to_path_buf()),
+        output_csv,
+        max_windows,
+        provider,
+    )
+}
+
+/// Canonical ECL analysis entry: load the model via [`ModelSource`], then run the pipeline.
+///
+/// License metering is intentionally not applied here (`license-client` owns that).
+pub fn analyze_ecl_with_source(
+    ecl_path: &Path,
+    model: &ModelSource,
+    output_csv: &Path,
+    max_windows: Option<usize>,
+    provider: ExecutionProviderKind,
+) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
     let source_info = parse_ecl_filename(ecl_path)?;
+    // Fail-fast on model source before reading the full ECL (Path missing / Embedded unavailable).
+    let mut model = Phase2Model::load_from_source(model, provider)?;
+
     let ecg_all_250 = read_ecl_adc_counts(ecl_path)?;
     eprintln!("[1/6] AI preprocessing ...");
     let signal = build_ai_continuous_signal(&ecg_all_250, &source_info)?;
@@ -75,12 +106,11 @@ pub fn analyze_ecl_with_limit(
     }
 
     eprintln!(
-        "[2/6] ONNX inference: windows={} requested_provider={}",
+        "[2/6] ONNX inference: windows={} requested_provider={} using_provider={}",
         starts.len(),
-        provider
+        provider,
+        model.provider()
     );
-    let mut model = Phase2Model::load_with_provider(onnx_path, provider)?;
-    eprintln!("[2/6] using execution provider={}", model.provider());
     let mut all_candidates = Vec::new();
     let mut rhythm_windows = Vec::new();
 
@@ -237,4 +267,148 @@ fn sample_to_time(file_start: NaiveDateTime, sample_500: i64) -> NaiveDateTime {
 
 fn format_beat_time(t: NaiveDateTime) -> String {
     t.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_source::ModelSource;
+    use crate::phase2::InferError;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Valid filename shape so preprocess filename parse succeeds; file need not exist
+    /// when model load fails first via `ModelSource`.
+    fn stub_ecl_path() -> PathBuf {
+        PathBuf::from("1234567890_20250101_0000_2359.ecl")
+    }
+
+    fn temp_csv() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("tempdir");
+        let csv = dir.path().join("out.csv");
+        (dir, csv)
+    }
+
+    #[test]
+    fn analyze_ecl_with_source_missing_path_errors_before_ecl_read() {
+        let (_dir, csv) = temp_csv();
+        let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1.onnx");
+        let source = ModelSource::Path(missing.clone());
+        let err = analyze_ecl_with_source(
+            &stub_ecl_path(),
+            &source,
+            &csv,
+            Some(0),
+            ExecutionProviderKind::Cpu,
+        )
+        .expect_err("missing model path must fail");
+        match err {
+            AnalyzeError::Infer(InferError::ModelNotFound(p)) => {
+                assert!(
+                    p.contains(missing.to_string_lossy().as_ref()) || p.contains("not found"),
+                    "error should identify missing path: {p}"
+                );
+            }
+            other => panic!("expected Infer(ModelNotFound), got {other}"),
+        }
+        assert!(!csv.exists(), "must not write CSV when model load fails");
+    }
+
+    #[test]
+    fn analyze_ecl_with_limit_wrapper_delegates_path_source() {
+        let (_dir, csv) = temp_csv();
+        let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1-wrap.onnx");
+        let err = analyze_ecl_with_limit(
+            &stub_ecl_path(),
+            &missing,
+            &csv,
+            Some(0),
+            ExecutionProviderKind::Cpu,
+        )
+        .expect_err("wrapper must surface missing Path via ModelSource");
+        assert!(
+            matches!(err, AnalyzeError::Infer(InferError::ModelNotFound(_))),
+            "wrapper should load via ModelSource::Path: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "embedded-model"))]
+    #[test]
+    fn analyze_ecl_with_source_embedded_rejected_without_feature() {
+        let (_dir, csv) = temp_csv();
+        let err = analyze_ecl_with_source(
+            &stub_ecl_path(),
+            &ModelSource::Embedded,
+            &csv,
+            Some(0),
+            ExecutionProviderKind::Cpu,
+        )
+        .expect_err("Embedded without feature must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("embedded-model") || msg.contains("Embedded"),
+            "must clearly reject Embedded without feature: {msg}"
+        );
+        assert!(!csv.exists());
+    }
+
+    #[test]
+    fn analyze_ecl_with_source_path_smoke_optional() {
+        let sample_link = Path::new("resources/samples/sample.ecl");
+        let onnx = Path::new("resources/models/phase2_rev1.onnx");
+        if !sample_link.exists() || !onnx.exists() {
+            eprintln!("skip: sample.ecl or ONNX not present");
+            return;
+        }
+        // Symlink basename is `sample.ecl`; resolve to the real file whose name matches ECL rules.
+        let sample = match sample_link.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skip: cannot canonicalize sample.ecl: {e}");
+                return;
+            }
+        };
+        let (_dir, csv) = temp_csv();
+        let source = ModelSource::Path(onnx.to_path_buf());
+        let (rows, summary) = analyze_ecl_with_source(
+            &sample,
+            &source,
+            &csv,
+            Some(1),
+            ExecutionProviderKind::Cpu,
+        )
+        .expect("path source analyze with 1 window");
+        assert_eq!(summary.windows, 1);
+        assert!(csv.exists());
+        assert_eq!(rows.len(), summary.beats);
+    }
+
+    #[cfg(feature = "embedded-model")]
+    #[test]
+    fn analyze_ecl_with_source_embedded_smoke_optional() {
+        let sample_link = Path::new("resources/samples/sample.ecl");
+        if !sample_link.exists() {
+            eprintln!("skip: sample.ecl not present");
+            return;
+        }
+        let sample = match sample_link.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skip: cannot canonicalize sample.ecl: {e}");
+                return;
+            }
+        };
+        let (_dir, csv) = temp_csv();
+        let (rows, summary) = analyze_ecl_with_source(
+            &sample,
+            &ModelSource::Embedded,
+            &csv,
+            Some(1),
+            ExecutionProviderKind::Cpu,
+        )
+        .expect("embedded source analyze without external model path");
+        assert_eq!(summary.windows, 1);
+        assert!(csv.exists());
+        assert_eq!(rows.len(), summary.beats);
+    }
 }

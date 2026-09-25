@@ -37,7 +37,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 3.3, 4.3_
 
 - [ ] 3. Integration: 解析パイプラインと CLI をソース切替対応にする
-- [ ] 3.1 ECL 解析エントリをモデルソース対応にする
+- [x] 3.1 ECL 解析エントリをモデルソース対応にする
   - 正規公開入口 `analyze_ecl_with_source` を追加し、`ModelSource` 経由でロードする
   - 既存の `analyze_ecl` / `analyze_ecl_with_limit` は Path → `ModelSource::Path` の薄い互換ラッパとする
   - ライセンス meter の挿入は本タスクに含めない（`license-client` が正規入口へ後から追加）
