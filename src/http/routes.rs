@@ -1,7 +1,7 @@
-//! Axum router assembly: health + analyze with body limit and timeout.
+//! Axum router assembly: health + analyze + static UI with body limit and timeout.
 
 use crate::http::error::HttpError;
-use crate::http::handlers::{AnalyzeHandler, HealthHandler};
+use crate::http::handlers::{static_ui_router, AnalyzeHandler, HealthHandler};
 use crate::http::state::AppState;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
@@ -12,9 +12,11 @@ use axum::{extract::Request, Router};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
-/// Build the HTTP service router (design: routes.rs).
+/// Build the HTTP service router (design: routes.rs / RouterIntegration).
 ///
-/// Applies configured body-size limit and end-to-end request timeout.
+/// Mounts console static delivery alongside `/health` and `/v1/analyze`.
+/// Body-size limit and request timeout come only from [`AppState`] / HttpConfig
+/// (no UI-specific relaxation). Static UI does not add license metering.
 pub fn build_router(state: AppState) -> Router {
     let max_body = state.max_body_bytes();
     let timeout = state.request_timeout();
@@ -22,6 +24,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(HealthHandler::get))
         .route("/v1/analyze", post(AnalyzeHandler::post))
+        .merge(static_ui_router())
         .layer(DefaultBodyLimit::max(max_body))
         .layer(RequestBodyLimitLayer::new(max_body))
         // TimeoutLayer is inner; map_timeout (outer) rewrites empty 408 → JSON 504.
@@ -112,46 +115,52 @@ mod tests {
             .block_on(fut)
     }
 
+    async fn oneshot_get(app: &axum::Router, uri: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot")
+    }
+
+    async fn oneshot_analyze(app: axum::Router) -> axum::response::Response {
+        let boundary = "----RoutesUnitBoundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"ecl\"; filename=\"1234567890_20240101_0000_2359.ecl\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n\
+             x\r\n\
+             --{boundary}--\r\n"
+        );
+        app.oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/v1/analyze")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("analyze")
+    }
+
     #[test]
     fn router_serves_health_and_analyze_paths() {
         with_gate(|meter_calls| {
             block_on(async {
                 let app = build_router(test_state());
-                let health = app
-                    .clone()
-                    .oneshot(
-                        HttpRequest::builder()
-                            .uri("/health")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .expect("health");
+                let health = oneshot_get(&app, "/health").await;
                 assert_eq!(health.status(), StatusCode::OK);
                 assert_eq!(meter_calls.load(Ordering::SeqCst), 0);
 
-                let boundary = "----RoutesUnitBoundary";
-                let body = format!(
-                    "--{boundary}\r\n\
-                     Content-Disposition: form-data; name=\"ecl\"; filename=\"1234567890_20240101_0000_2359.ecl\"\r\n\
-                     Content-Type: application/octet-stream\r\n\r\n\
-                     x\r\n\
-                     --{boundary}--\r\n"
-                );
-                let analyze = app
-                    .oneshot(
-                        HttpRequest::builder()
-                            .method("POST")
-                            .uri("/v1/analyze")
-                            .header(
-                                header::CONTENT_TYPE,
-                                format!("multipart/form-data; boundary={boundary}"),
-                            )
-                            .body(Body::from(body))
-                            .unwrap(),
-                    )
-                    .await
-                    .expect("analyze");
+                let analyze = oneshot_analyze(app).await;
                 assert_ne!(analyze.status(), StatusCode::NOT_FOUND);
                 assert_eq!(meter_calls.load(Ordering::SeqCst), 1);
                 let bytes = to_bytes(analyze.into_body(), 1024 * 1024)
@@ -161,6 +170,65 @@ mod tests {
                 assert!(
                     v.get("rows").is_none(),
                     "failure path must not leak analyze rows"
+                );
+            });
+        });
+    }
+
+    /// Task 3.1 / design RouterIntegration: `/ui/`, `/health`, `/v1/analyze` coexist;
+    /// static delivery does not meter; one analyze → one meter (req 1.3, 6.1, 6.2).
+    #[test]
+    fn build_router_serves_ui_health_analyze_with_single_meter() {
+        with_gate(|meter_calls| {
+            block_on(async {
+                let app = build_router(test_state());
+
+                let ui = oneshot_get(&app, "/ui/").await;
+                assert_eq!(ui.status(), StatusCode::OK, "/ui/ must be mounted");
+                let ui_ct = ui
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert!(
+                    ui_ct.starts_with("text/html"),
+                    "/ui/ Content-Type must be text/html, got {ui_ct}"
+                );
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    0,
+                    "static UI must not meter"
+                );
+
+                let health = oneshot_get(&app, "/health").await;
+                assert_eq!(health.status(), StatusCode::OK);
+                let health_bytes = to_bytes(health.into_body(), 1024).await.expect("health body");
+                let health_json: Value =
+                    serde_json::from_slice(&health_bytes).expect("health json");
+                assert_eq!(health_json["status"], "ok");
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    0,
+                    "health must not meter"
+                );
+
+                let root = oneshot_get(&app, "/").await;
+                assert!(
+                    root.status().is_redirection(),
+                    "GET / should redirect to /ui/, got {}",
+                    root.status()
+                );
+
+                let analyze = oneshot_analyze(app).await;
+                assert_ne!(
+                    analyze.status(),
+                    StatusCode::NOT_FOUND,
+                    "/v1/analyze must remain reachable"
+                );
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    1,
+                    "exactly one meter per analyze; UI must not add metering"
                 );
             });
         });

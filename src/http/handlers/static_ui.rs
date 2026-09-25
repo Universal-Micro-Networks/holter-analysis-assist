@@ -1,8 +1,7 @@
 //! GET `/ui/` (and assets) — embedded console delivery without license metering.
 //!
 //! Design component: StaticUiHandler.
-//! Full mount into [`crate::http::routes::build_router`] is task 3.1; this module
-//! exposes [`static_ui_router`] for that integration.
+//! Mounted into [`crate::http::routes::build_router`] via [`static_ui_router`].
 
 use crate::http::assets::EmbeddedConsoleAssets;
 use axum::extract::Path;
@@ -50,11 +49,16 @@ impl StaticUiHandler {
     }
 }
 
-/// Route builder for console delivery (task 2.2). Task 3.1 merges this into the
-/// main HTTP router alongside `/health` and `/v1/analyze`.
+/// Route builder for console delivery. Merged into [`crate::http::routes::build_router`]
+/// alongside `/health` and `/v1/analyze` (task 3.1 / RouterIntegration).
 ///
-/// Does not call LicenseGate / analyze — static bytes only (requirement 6.2).
-pub fn static_ui_router() -> Router {
+/// Generic over `S` so it can merge into the stateful API router without changing
+/// handler contracts. Does not call LicenseGate / analyze — static bytes only
+/// (requirement 6.2).
+pub fn static_ui_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     Router::new()
         .route("/", get(StaticUiHandler::redirect_root))
         .route("/ui", get(StaticUiHandler::index))
