@@ -53,7 +53,8 @@ Default output root: `packaging/out/staging/<os>/`.
 - Key meanings remain as documented in the upstream example comments; this
   packaging layer does not redefine them.
 - NOTICE location in artifacts: alongside the binary / under the package share
-  directory (exact paths in `docs/packaging/*`, later task).
+  directory (exact paths in `docs/packaging/docker.md`, `windows.md`,
+  `linux-packages.md`). Manual smoke (not CI-required): `docs/packaging/manual-smoke.md`.
 
 ## Out of scope for this packaging feature
 

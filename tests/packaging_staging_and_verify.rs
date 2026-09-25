@@ -1,8 +1,9 @@
-//! packaging-distribution task 1.2: StagingLayout + ArtifactVerify.
+//! packaging-distribution task 1.2 + 4.2: StagingLayout + ArtifactVerify.
 //!
 //! - prepare-staging assembles bin + NOTICE + sample ini under packaging/out/staging/<os>
 //! - verify-artifact exits 0 on a valid tree
 //! - verify-artifact exits non-zero on missing NOTICE / ini / binary, or forbidden model files
+//!   (task 4.2: success + NOTICE/ini missing + forbidden ext including .onnx / .ort / .weights.h5)
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -263,5 +264,74 @@ fn verify_fails_when_onnx_present() {
     assert!(
         err.to_ascii_lowercase().contains("onnx"),
         "failure reason should mention onnx; got:\n{err}"
+    );
+}
+
+/// task 4.2 gap: forbidden extensions beyond `.onnx` must also fail closed.
+#[test]
+fn verify_fails_when_ort_present() {
+    let root = repo_root();
+    let verify = root.join("packaging/scripts/verify-artifact.sh");
+    assert!(verify.is_file(), "missing {}", verify.display());
+
+    let staging = TempDir::new().unwrap();
+    fs::create_dir_all(staging.path().join("bin")).unwrap();
+    fs::write(staging.path().join("bin/holter-http-api"), b"mock").unwrap();
+    fs::write(staging.path().join("NOTICE"), "ORT notice\n").unwrap();
+    fs::write(
+        staging.path().join("http.ini.example"),
+        "[http]\nbind=0.0.0.0:8080\n\n[license]\nserver_url=https://x\n",
+    )
+    .unwrap();
+    fs::write(staging.path().join("weights.ort"), b"raw-ort").unwrap();
+
+    let out = run_bash(&verify, &[staging.path().to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "verify must fail when .ort is present"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.to_ascii_lowercase().contains("ort") || err.to_ascii_lowercase().contains("forbidden"),
+        "failure reason should mention ort/forbidden; got:\n{err}"
+    );
+}
+
+/// task 4.2 gap: `*.weights.h5` must fail closed.
+#[test]
+fn verify_fails_when_weights_h5_present() {
+    let root = repo_root();
+    let verify = root.join("packaging/scripts/verify-artifact.sh");
+    assert!(verify.is_file(), "missing {}", verify.display());
+
+    let staging = TempDir::new().unwrap();
+    fs::create_dir_all(staging.path().join("bin")).unwrap();
+    fs::write(staging.path().join("bin/holter-http-api"), b"mock").unwrap();
+    fs::write(staging.path().join("NOTICE"), "ORT notice\n").unwrap();
+    fs::write(
+        staging.path().join("http.ini.example"),
+        "[http]\nbind=0.0.0.0:8080\n\n[license]\nserver_url=https://x\n",
+    )
+    .unwrap();
+    fs::write(staging.path().join("model.weights.h5"), b"raw-h5").unwrap();
+
+    let out = run_bash(&verify, &[staging.path().to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "verify must fail when .weights.h5 is present"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let lower = err.to_ascii_lowercase();
+    assert!(
+        lower.contains("weights.h5") || lower.contains("forbidden") || lower.contains("h5"),
+        "failure reason should mention weights.h5/forbidden; got:\n{err}"
     );
 }
