@@ -7,9 +7,12 @@ pub mod analyze;
 pub mod dsp;
 #[cfg(feature = "embedded-model")]
 pub mod embedded_model;
+pub mod model_source;
 pub mod phase2;
 pub mod postprocess;
 pub mod preprocess;
+
+pub use model_source::{ModelSource, ModelSourceError};
 
 use serde::{Deserialize, Serialize};
 use std::fs;
