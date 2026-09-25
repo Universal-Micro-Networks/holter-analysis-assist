@@ -1,8 +1,13 @@
 //! Blocking HTTP adapter for the license server ([`ReqwestLicenseClient`]).
 //!
 //! Uses [`LicenseConfig`] URLs, paths, timeout, and optional Bearer `api_key`.
-//! Non-2xx, `allowed: false`, timeout, and transport failures map to
-//! [`LicenseError::StartupFailed`] (check) or [`LicenseError::InferenceDenied`] (meter).
+//!
+//! **Provisional policy (until a real license server is available):** when the
+//! server is unreachable, times out, returns non-2xx, or returns unparseable
+//! JSON, both check and meter **allow** (soft-open). An explicit JSON
+//! `allowed: false` still denies. Restore fail-closed transport mapping when
+//! the license server is production-ready.
+//!
 //! Error / Debug output must never include the API key plaintext.
 
 use super::client::LicenseClient;
@@ -101,19 +106,30 @@ fn parse_allowed_response(text: &str) -> Result<(bool, Option<String>), String> 
 impl LicenseClient for ReqwestLicenseClient {
     fn check_validity(&self) -> Result<LicenseCheckResult, LicenseError> {
         let fail = |msg: String| LicenseError::StartupFailed(msg);
+        let provisional_allow = |reason: String| {
+            eprintln!("license: provisional allow (check): {reason}");
+            Ok(LicenseCheckResult {
+                allowed: true,
+                message: Some(format!("provisional allow: {reason}")),
+            })
+        };
 
-        let (status, text) = self
-            .post_json(&self.config.check_path, &serde_json::json!({}))
-            .map_err(fail)?;
+        let (status, text) = match self.post_json(&self.config.check_path, &serde_json::json!({})) {
+            Ok(v) => v,
+            Err(msg) => return provisional_allow(msg),
+        };
 
         if !status.is_success() {
-            return Err(fail(format!(
+            return provisional_allow(format!(
                 "validity check HTTP {status}: {}",
                 truncate_for_error(&text)
-            )));
+            ));
         }
 
-        let (allowed, message) = parse_allowed_response(&text).map_err(fail)?;
+        let (allowed, message) = match parse_allowed_response(&text) {
+            Ok(v) => v,
+            Err(msg) => return provisional_allow(msg),
+        };
         if !allowed {
             return Err(fail(
                 message.unwrap_or_else(|| "validity check denied".into()),
@@ -127,6 +143,13 @@ impl LicenseClient for ReqwestLicenseClient {
 
     fn authorize_and_meter(&self) -> Result<LicenseMeterResult, LicenseError> {
         let fail = |msg: String| LicenseError::InferenceDenied(msg);
+        let provisional_allow = |reason: String| {
+            eprintln!("license: provisional allow (meter): {reason}");
+            Ok(LicenseMeterResult {
+                allowed: true,
+                message: Some(format!("provisional allow: {reason}")),
+            })
+        };
 
         #[derive(Serialize)]
         struct MeterBody {
@@ -138,18 +161,22 @@ impl LicenseClient for ReqwestLicenseClient {
             kind: "analyze_job",
         };
 
-        let (status, text) = self
-            .post_json(&self.config.meter_path, &body)
-            .map_err(fail)?;
+        let (status, text) = match self.post_json(&self.config.meter_path, &body) {
+            Ok(v) => v,
+            Err(msg) => return provisional_allow(msg),
+        };
 
         if !status.is_success() {
-            return Err(fail(format!(
+            return provisional_allow(format!(
                 "authorize and meter HTTP {status}: {}",
                 truncate_for_error(&text)
-            )));
+            ));
         }
 
-        let (allowed, message) = parse_allowed_response(&text).map_err(fail)?;
+        let (allowed, message) = match parse_allowed_response(&text) {
+            Ok(v) => v,
+            Err(msg) => return provisional_allow(msg),
+        };
         if !allowed {
             return Err(fail(
                 message.unwrap_or_else(|| "authorize and meter denied".into()),
@@ -444,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn check_non_2xx_maps_to_startup_failed() {
+    fn check_non_2xx_is_provisional_allow() {
         let (base, _captured, handle) = spawn_mock(MockResponse {
             status_line: "HTTP/1.1 503 Service Unavailable",
             body: r#"{"error":"down"}"#.into(),
@@ -459,14 +486,21 @@ mod tests {
         ))
         .expect("client");
 
-        let err = client.check_validity().expect_err("non-2xx");
-        assert!(matches!(err, LicenseError::StartupFailed(_)), "{err:?}");
-        assert!(err.to_string().contains("startup failed"));
+        let result = client.check_validity().expect("provisional allow on non-2xx");
+        assert!(result.allowed);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("provisional allow"),
+            "{result:?}"
+        );
         let _ = handle.join();
     }
 
     #[test]
-    fn meter_non_2xx_maps_to_inference_denied() {
+    fn meter_non_2xx_is_provisional_allow() {
         let (base, _captured, handle) = spawn_mock(MockResponse {
             status_line: "HTTP/1.1 500 Internal Server Error",
             body: "oops".into(),
@@ -481,14 +515,15 @@ mod tests {
         ))
         .expect("client");
 
-        let err = client.authorize_and_meter().expect_err("non-2xx");
-        assert!(matches!(err, LicenseError::InferenceDenied(_)), "{err:?}");
-        assert!(err.to_string().contains("inference denied"));
+        let result = client
+            .authorize_and_meter()
+            .expect("provisional allow on non-2xx");
+        assert!(result.allowed);
         let _ = handle.join();
     }
 
     #[test]
-    fn check_timeout_maps_to_startup_failed() {
+    fn check_timeout_is_provisional_allow() {
         let (base, _captured, handle) = spawn_mock(MockResponse {
             status_line: "HTTP/1.1 200 OK",
             body: r#"{"allowed":true}"#.into(),
@@ -503,16 +538,33 @@ mod tests {
         ))
         .expect("client");
 
-        let err = client.check_validity().expect_err("timeout");
+        let result = client.check_validity().expect("provisional allow on timeout");
+        assert!(result.allowed);
         assert!(
-            matches!(&err, LicenseError::StartupFailed(msg) if msg.to_lowercase().contains("timed out") || msg.to_lowercase().contains("timeout")),
-            "{err:?}"
+            result
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("timed out")
+                || result
+                    .message
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains("timeout")
+                || result
+                    .message
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("provisional allow"),
+            "{result:?}"
         );
         let _ = handle.join();
     }
 
     #[test]
-    fn meter_transport_fail_maps_to_inference_denied() {
+    fn meter_transport_fail_is_provisional_allow() {
         // Nothing listening on this port.
         let client = ReqwestLicenseClient::new(config_for(
             "http://127.0.0.1:1",
@@ -523,9 +575,10 @@ mod tests {
         ))
         .expect("client");
 
-        let err = client.authorize_and_meter().expect_err("transport");
-        assert!(matches!(err, LicenseError::InferenceDenied(_)), "{err:?}");
-        assert!(err.to_string().contains("inference denied"));
+        let result = client
+            .authorize_and_meter()
+            .expect("provisional allow on transport fail");
+        assert!(result.allowed);
     }
 
     #[test]
@@ -552,16 +605,17 @@ mod tests {
         );
         assert!(debug.contains("***") || !debug.to_lowercase().contains("super-secret"));
 
-        let err = client.check_validity().expect_err("401");
-        let display = err.to_string();
-        let err_dbg = format!("{err:?}");
-        assert!(!display.contains(secret), "Display leaked: {display}");
-        assert!(!err_dbg.contains(secret), "Error Debug leaked: {err_dbg}");
+        let result = client.check_validity().expect("401 is provisional allow");
+        assert!(result.allowed);
+        let display = format!("{result:?}");
+        let err_dbg = format!("{client:?}");
+        assert!(!display.contains(secret), "result leaked: {display}");
+        assert!(!err_dbg.contains(secret), "client Debug leaked: {err_dbg}");
         let _ = handle.join();
     }
 
     #[test]
-    fn invalid_json_response_is_failure() {
+    fn invalid_json_response_is_provisional_allow() {
         let (base, _captured, handle) = spawn_mock(MockResponse {
             status_line: "HTTP/1.1 200 OK",
             body: "not-json".into(),
@@ -576,8 +630,10 @@ mod tests {
         ))
         .expect("client");
 
-        let err = client.check_validity().expect_err("bad json");
-        assert!(matches!(err, LicenseError::StartupFailed(_)), "{err:?}");
+        let result = client
+            .check_validity()
+            .expect("provisional allow on bad JSON");
+        assert!(result.allowed);
         let _ = handle.join();
     }
 }

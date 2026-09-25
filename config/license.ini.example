@@ -12,6 +12,9 @@
 [license]
 # Required. License server base URL (no trailing path for check/meter — those are separate keys).
 # Prefer https:// in production. http:// is allowed for local development only.
+# Provisional (until a real license server exists): if the server is unreachable,
+# times out, returns non-2xx, or returns invalid JSON, the client ALLOWS startup
+# and metering. Explicit JSON {"allowed":false} still denies.
 server_url=https://license.example.com
 
 # Optional. Bearer token / API key for Authorization. Leave unset if the server does not require it.
