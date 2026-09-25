@@ -130,11 +130,9 @@ mod tests {
 mod embedded_model_feature_off_tests {
     #[test]
     fn embedded_model_api_not_available_without_feature() {
-        // `pub mod embedded_model` is cfg-gated; without the feature the module path
-        // does not exist, so callers cannot select an embedded source at compile time.
-        assert!(
-            !cfg!(feature = "embedded-model"),
-            "default / feature-off builds must not enable embedded-model"
-        );
+        // This module only compiles when `embedded-model` is off, so the presence of
+        // this test is itself the feature-off proof. Calling into `embedded_model`
+        // here would be a compile error — which is the intended gate.
+        let _ = std::any::type_name::<()>();
     }
 }

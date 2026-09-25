@@ -18,10 +18,7 @@ fn dependencies_section(toml: &str) -> &str {
         .find("[dependencies]")
         .expect("Cargo.toml must have [dependencies]");
     let after = &toml[start + "[dependencies]".len()..];
-    let end = after
-        .find("\n[")
-        .map(|i| i)
-        .unwrap_or(after.len());
+    let end = after.find("\n[").unwrap_or(after.len());
     &after[..end]
 }
 
