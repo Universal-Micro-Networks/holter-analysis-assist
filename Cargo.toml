@@ -19,10 +19,12 @@ embedded-model = []
 chrono = { version = "0.4", default-features = false, features = ["alloc", "std"] }
 clap = { version = "4.5", features = ["derive"] }
 csv = "1.3"
+ini = { package = "rust-ini", version = "0.21" }
 ndarray = "0.17"
 # lax-feature-matching: tolerate EP feature sets without an exact multi-EP prebuilt binary.
 ort = { version = "=2.0.0-rc.13", default-features = true, features = ["lax-feature-matching"] }
 regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rustfft = "6.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
