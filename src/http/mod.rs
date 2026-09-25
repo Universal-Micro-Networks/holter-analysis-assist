@@ -17,7 +17,7 @@ pub use handlers::{static_ui_router, AnalyzeHandler, HealthBody, HealthHandler, 
 pub use response::{AnalyzeJsonBody, AnalyzeSummaryJson, ResponseCodec};
 pub use routes::build_router;
 pub use startup::{install_and_ensure_startup_licensed, run, serve, StartupError};
-pub use state::AppState;
+pub use state::{AppState, SharedModel};
 
 /// Returns true when the HTTP module is linked and callable from the binary.
 pub fn module_ready() -> bool {

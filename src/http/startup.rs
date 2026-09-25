@@ -4,6 +4,7 @@ use crate::http::config::{HttpConfig, HttpConfigError};
 use crate::http::routes::build_router;
 use crate::http::state::AppState;
 use crate::license::{LicenseConfig, LicenseError, LicenseGate, ReqwestLicenseClient};
+use crate::phase2::InferError;
 use std::path::Path;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -15,6 +16,8 @@ pub enum StartupError {
     HttpConfig(#[from] HttpConfigError),
     #[error("{0}")]
     License(#[from] LicenseError),
+    #[error("model load failed: {0}")]
+    Model(#[from] InferError),
     #[error("bind failed on {addr}: {source}")]
     Bind {
         addr: String,
@@ -57,9 +60,11 @@ pub async fn run(config_path: &Path) -> Result<(), StartupError> {
 }
 
 /// Bind and serve after license gate has already succeeded.
+///
+/// Loads the Phase-2 ONNX model once into [`AppState`] before listening.
 pub async fn serve(http_config: HttpConfig) -> Result<(), StartupError> {
     let bind = http_config.bind.clone();
-    let state = AppState::from_config(http_config);
+    let state = AppState::from_config(http_config)?;
     let app = build_router(state);
 
     let listener = TcpListener::bind(&bind)

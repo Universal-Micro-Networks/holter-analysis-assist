@@ -33,6 +33,8 @@ ORIG_FS = 250
 FS = MODEL_FS_HZ
 UPSAMPLE_FACTOR = FS // ORIG_FS
 EXPECTED_24H_SAMPLES_250 = ORIG_FS * 24 * 60 * 60
+MAX_RECORDING_DAYS = 7
+MAX_RECORDING_SAMPLES_250 = ORIG_FS * 24 * 60 * 60 * MAX_RECORDING_DAYS
 
 WINDOW_SEC = 20.0
 OVERLAP_SEC = 3.0
@@ -102,19 +104,20 @@ def read_ecl_adc_counts(ecl_path: str | Path) -> tuple[np.ndarray, np.ndarray]:
 
     ECGは12-bit値を復号後、0x0800を引いてゼロ中心化する。
     mV換算は行わない。event codeは本モデル入力には使用しない。
+
+    24時間未満は拒否。最大 ``MAX_RECORDING_DAYS`` 日まで読み、それ超の tail は切り捨てる。
+    解析窓の区間はファイル名の記録区間（``valid_range_250``）で決まる。
     """
     ecl_path = Path(ecl_path)
     words_all = np.fromfile(ecl_path, dtype=ECL_DTYPE)
 
-    extra = len(words_all) - EXPECTED_24H_SAMPLES_250
-    if extra < 0:
+    if len(words_all) < EXPECTED_24H_SAMPLES_250:
         raise ValueError(
             f"ECL shorter than 24 h: actual={len(words_all):,}, "
             f"expected={EXPECTED_24H_SAMPLES_250:,}"
         )
-    if extra > 0:
-        # ECL入力仕様に合わせ、24時間相当を超えるtail wordは切り捨てる。
-        words = words_all[:EXPECTED_24H_SAMPLES_250]
+    if len(words_all) > MAX_RECORDING_SAMPLES_250:
+        words = words_all[:MAX_RECORDING_SAMPLES_250]
     else:
         words = words_all
 
@@ -125,10 +128,19 @@ def read_ecl_adc_counts(ecl_path: str | Path) -> tuple[np.ndarray, np.ndarray]:
     ecg_counts = (raw12 - ECL_ZERO_LEVEL).astype(np.float32)
     return ecg_counts, event_code
 
+def recording_end_exclusive_capped(source_info: dict):
+    """ファイル名の記録終了（排他）を最大 ``MAX_RECORDING_DAYS`` 日でキャップする。"""
+    from_name = source_info["recording_end"] + pd.Timedelta(milliseconds=1)
+    max_end = source_info["recording_start"] + pd.Timedelta(days=MAX_RECORDING_DAYS)
+    return min(from_name, max_end)
+
 def valid_range_250(source_info: dict, n_samples: int) -> tuple[int, int]:
-    """ECL 24時間配列中の有効記録区間 [start,end) を250-Hz sampleで返す。"""
+    """ECL 配列中の有効記録区間 [start,end) を250-Hz sampleで返す。
+
+    区間はファイル名の記録開始〜終了。長さは最大 ``MAX_RECORDING_DAYS`` 日。
+    """
     file_start = source_info["study_date"]
-    end_exclusive = source_info["recording_end"] + pd.Timedelta(milliseconds=1)
+    end_exclusive = recording_end_exclusive_capped(source_info)
 
     start = int(round(
         (source_info["recording_start"] - file_start).total_seconds() * ORIG_FS

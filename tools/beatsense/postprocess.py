@@ -966,11 +966,17 @@ def build_unknown_intervals(
     valid_start_250, valid_end_250 = valid_range_250(source_info, len(ecg_all_250))
     file_start_time = source_info["study_date"]
     recording_start = source_info["recording_start"]
-    recording_end_exclusive = source_info["recording_end"] + pd.Timedelta(milliseconds=1)
+    from .preprocess import recording_end_exclusive_capped
+    recording_end_exclusive = recording_end_exclusive_capped(source_info)
 
     rows: list[tuple[int, int, float]] = []
 
-    for hour_index in range(24):
+    first_hour_index = max(0, int((recording_start - file_start_time).total_seconds() // 3600))
+    last_hour_index_excl = int(
+        ((recording_end_exclusive - file_start_time).total_seconds() + 3599) // 3600
+    )
+
+    for hour_index in range(first_hour_index, last_hour_index_excl):
         hour_start = file_start_time + pd.Timedelta(hours=hour_index)
         hour_end = hour_start + pd.Timedelta(hours=1)
 

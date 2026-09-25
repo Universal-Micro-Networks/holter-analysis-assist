@@ -3,10 +3,10 @@
 //! HTTP must not call the license inference-gate APIs directly; metering stays
 //! inside the library entry via the process-wide LicenseGate.
 
-use crate::analyze::{analyze_ecl_with_source, AnalyzeError};
+use crate::analyze::{analyze_ecl_with_model, analyze_ecl_with_source, AnalyzeError};
 use crate::http::error::HttpError;
 use crate::http::response::ResponseCodec;
-use crate::http::state::AppState;
+use crate::http::state::{AppState, SharedModel};
 use crate::phase2::ExecutionProviderKind;
 use crate::preprocess::parse_ecl_filename;
 use axum::extract::{DefaultBodyLimit, Multipart, State};
@@ -48,8 +48,10 @@ impl AnalyzeHandler {
         // Validate ECL filename contract before calling the canonical entry (no meter).
         parse_ecl_filename(&parts.ecl_path).map_err(|e| HttpError::from(AnalyzeError::from(e)))?;
 
-        let model = state.model_source.clone();
-        let provider = parts.provider.unwrap_or_else(|| state.provider());
+        let model_source = state.model_source.clone();
+        let shared = state.shared_model().clone();
+        let default_provider = state.provider();
+        let provider = parts.provider.unwrap_or(default_provider);
         let max_windows = parts.max_windows;
         let ecl_path = parts.ecl_path.clone();
         let format = parts.format;
@@ -59,7 +61,7 @@ impl AnalyzeHandler {
         let out_csv = out_dir.path().join("beat_results.csv");
 
         let analyze_result = tokio::task::spawn_blocking(move || {
-            analyze_ecl_with_source(&ecl_path, &model, &out_csv, max_windows, provider)
+            run_analyze(&shared, &model_source, provider, &ecl_path, &out_csv, max_windows)
         })
         .await
         .map_err(|e| HttpError::internal(format!("analyze task join failed: {e}")))?;
@@ -105,6 +107,42 @@ impl AnalyzeHandler {
             .route("/v1/analyze", post(Self::post))
             .layer(DefaultBodyLimit::max(limit))
             .with_state(state)
+    }
+}
+
+fn run_analyze(
+    shared: &SharedModel,
+    model_source: &crate::model_source::ModelSource,
+    provider: ExecutionProviderKind,
+    ecl_path: &Path,
+    out_csv: &Path,
+    max_windows: Option<usize>,
+) -> Result<(Vec<crate::analyze::BeatResultRow>, crate::analyze::AnalyzeSummary), AnalyzeError> {
+    match shared {
+        SharedModel::Resident(model) => {
+            let mut guard = model.lock().map_err(|_| {
+                AnalyzeError::Post("resident model lock poisoned".into())
+            })?;
+            // Per-request provider override only when it disagrees with the loaded EP.
+            // `Auto` always reuses the resident session (already resolved at startup).
+            let need_reload = match provider {
+                ExecutionProviderKind::Auto => false,
+                other => other != guard.provider(),
+            };
+            if need_reload {
+                eprintln!(
+                    "holter-http-api: per-request provider={provider} != resident={}; loading ephemeral session",
+                    guard.provider()
+                );
+                drop(guard);
+                analyze_ecl_with_source(ecl_path, model_source, out_csv, max_windows, provider)
+            } else {
+                analyze_ecl_with_model(ecl_path, &mut guard, out_csv, max_windows)
+            }
+        }
+        SharedModel::Ephemeral(source) => {
+            analyze_ecl_with_source(ecl_path, source, out_csv, max_windows, provider)
+        }
     }
 }
 

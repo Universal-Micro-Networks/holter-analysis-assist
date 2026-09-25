@@ -13,7 +13,12 @@ use thiserror::Error;
 pub const ORIG_FS: u32 = 250;
 pub const FS: u32 = 500;
 pub const UPSAMPLE_FACTOR: usize = (FS / ORIG_FS) as usize;
+/// Minimum ECL container length (BeatSense: one calendar day of samples).
 pub const EXPECTED_24H_SAMPLES_250: usize = ORIG_FS as usize * 24 * 60 * 60;
+/// Maximum analyzable recording length (filename span is capped to this).
+pub const MAX_RECORDING_DAYS: i64 = 7;
+pub const MAX_RECORDING_SAMPLES_250: usize =
+    ORIG_FS as usize * 24 * 60 * 60 * (MAX_RECORDING_DAYS as usize);
 
 pub const WINDOW_SEC: f32 = 20.0;
 pub const OVERLAP_SEC: f32 = 3.0;
@@ -97,6 +102,10 @@ pub fn parse_ecl_filename(path: &Path) -> Result<EclSourceInfo, PreprocessError>
 }
 
 /// Decode ECL 16-bit LE words → zero-centered 12-bit ADC counts (float32).
+///
+/// Accepts containers from 24 h up to [`MAX_RECORDING_DAYS`] days. Longer tails
+/// are truncated. Analysis windows still come from the filename recording span
+/// (see [`valid_range_250`]), not the full buffer.
 pub fn read_ecl_adc_counts(path: &Path) -> Result<Vec<f32>, PreprocessError> {
     let mut file = File::open(path)?;
     let mut bytes = Vec::new();
@@ -112,8 +121,14 @@ pub fn read_ecl_adc_counts(path: &Path) -> Result<Vec<f32>, PreprocessError> {
             "ECL shorter than 24 h: actual={n_words}, expected={EXPECTED_24H_SAMPLES_250}"
         )));
     }
-    let words = &bytes[..EXPECTED_24H_SAMPLES_250 * 2];
-    let mut ecg = Vec::with_capacity(EXPECTED_24H_SAMPLES_250);
+    let n_read = n_words.min(MAX_RECORDING_SAMPLES_250);
+    if n_words > MAX_RECORDING_SAMPLES_250 {
+        eprintln!(
+            "ECL longer than {MAX_RECORDING_DAYS} days ({n_words} samples); truncating to {n_read}"
+        );
+    }
+    let words = &bytes[..n_read * 2];
+    let mut ecg = Vec::with_capacity(n_read);
     for chunk in words.chunks_exact(2) {
         let w = u16::from_le_bytes([chunk[0], chunk[1]]);
         let high4 = (w & ECL_ECG_HIGH4_MASK) >> 4;
@@ -124,12 +139,28 @@ pub fn read_ecl_adc_counts(path: &Path) -> Result<Vec<f32>, PreprocessError> {
     Ok(ecg)
 }
 
+/// Exclusive end of the analyzable recording: filename end, capped at
+/// [`MAX_RECORDING_DAYS`] after [`EclSourceInfo::recording_start`].
+pub fn recording_end_exclusive_capped(info: &EclSourceInfo) -> NaiveDateTime {
+    let from_name = info.recording_end + Duration::milliseconds(1);
+    let max_end = info.recording_start + Duration::days(MAX_RECORDING_DAYS);
+    from_name.min(max_end)
+}
+
 pub fn valid_range_250(
     info: &EclSourceInfo,
     n_samples: usize,
 ) -> Result<(usize, usize), PreprocessError> {
     let file_start = info.study_date.and_hms_opt(0, 0, 0).unwrap();
-    let end_exclusive = info.recording_end + Duration::milliseconds(1);
+    let end_exclusive = recording_end_exclusive_capped(info);
+    if end_exclusive < info.recording_end + Duration::milliseconds(1) {
+        eprintln!(
+            "recording span capped to {MAX_RECORDING_DAYS} days: {} .. {} (was .. {})",
+            info.recording_start,
+            end_exclusive - Duration::milliseconds(1),
+            info.recording_end
+        );
+    }
     let start = ((info.recording_start - file_start).num_milliseconds() as f64 / 1000.0
         * ORIG_FS as f64)
         .round() as i64;
@@ -234,5 +265,65 @@ mod tests {
                 .and_hms_opt(14, 15, 0)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn window_count_matches_recording_span_not_full_ecl_buffer() {
+        // 20s window / 17s step @ 500 Hz.
+        // Full 24h buffer → 5082 windows; 14:15–23:59 valid span → 2064.
+        fn count_windows(len_500: usize) -> usize {
+            if len_500 < WINDOW_SAMPLES {
+                return 0;
+            }
+            let mut n = 0usize;
+            let mut s = 0usize;
+            while s + WINDOW_SAMPLES <= len_500 {
+                n += 1;
+                s += STEP_SAMPLES;
+            }
+            n
+        }
+        assert_eq!(
+            count_windows(EXPECTED_24H_SAMPLES_250 * UPSAMPLE_FACTOR),
+            5082
+        );
+        // 14:15 → midnight exclusive ≈ 8_775_000 samples @ 250 Hz → 17_550_000 @ 500 Hz
+        let valid_250 = 8_775_000usize;
+        assert_eq!(count_windows(valid_250 * UPSAMPLE_FACTOR), 2064);
+    }
+
+    #[test]
+    fn valid_range_caps_at_max_recording_days() {
+        let study = NaiveDate::from_ymd_opt(2025, 5, 12).unwrap();
+        let info = EclSourceInfo {
+            serial: "2501103675".into(),
+            study_date: study,
+            recording_start: study.and_hms_opt(14, 15, 0).unwrap(),
+            // Intentionally longer than 7 days (filename-style end far in the future).
+            recording_end: (study + Duration::days(10))
+                .and_hms_opt(14, 15, 0)
+                .unwrap(),
+            start_time_hhmm: "1415".into(),
+            end_time_hhmm: "1415".into(),
+        };
+        let n_samples = MAX_RECORDING_SAMPLES_250 + EXPECTED_24H_SAMPLES_250;
+        let (start, end) = valid_range_250(&info, n_samples).unwrap();
+        assert_eq!(start, 14 * 3600 * ORIG_FS as usize + 15 * 60 * ORIG_FS as usize);
+        assert_eq!(end - start, MAX_RECORDING_SAMPLES_250);
+        let excl = recording_end_exclusive_capped(&info);
+        assert_eq!(
+            excl,
+            info.recording_start + Duration::days(MAX_RECORDING_DAYS)
+        );
+    }
+
+    #[test]
+    fn valid_range_keeps_short_filename_span() {
+        let p = PathBuf::from("2501103675_20250512_1415_2359.ecl");
+        let info = parse_ecl_filename(&p).unwrap();
+        let (start, end) = valid_range_250(&info, EXPECTED_24H_SAMPLES_250).unwrap();
+        assert_eq!(start, 12_825_000);
+        assert_eq!(end, 21_600_000);
+        assert_eq!(end - start, 8_775_000);
     }
 }

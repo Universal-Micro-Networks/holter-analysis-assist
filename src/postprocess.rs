@@ -3,7 +3,8 @@
 use crate::dsp::{find_peaks, resample_poly_2x};
 use crate::phase2::{TH_AF, TH_BEAT, TH_PAC, TH_PVC};
 use crate::preprocess::{
-    valid_range_250, EclSourceInfo, FS, ORIG_FS, UPSAMPLE_FACTOR, WINDOW_CENTER,
+    recording_end_exclusive_capped, valid_range_250, EclSourceInfo, FS, ORIG_FS, UPSAMPLE_FACTOR,
+    WINDOW_CENTER,
 };
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
@@ -639,10 +640,14 @@ pub fn build_unknown_intervals(
     let (valid_start_250, valid_end_250) =
         valid_range_250(info, ecg_all_250.len()).map_err(|e| e.to_string())?;
     let file_start = info.study_date.and_hms_opt(0, 0, 0).unwrap();
-    let recording_end_exclusive = info.recording_end + chrono::Duration::milliseconds(1);
+    let recording_end_exclusive = recording_end_exclusive_capped(info);
+
+    // Hour buckets covering the (capped) recording span — not a fixed first calendar day.
+    let first_hour_index = ((info.recording_start - file_start).num_seconds() / 3600).max(0);
+    let last_hour_index_excl = ((recording_end_exclusive - file_start).num_seconds() + 3599) / 3600;
 
     let mut rows: Vec<(i64, i64, f64)> = Vec::new();
-    for hour_index in 0..24 {
+    for hour_index in first_hour_index..last_hour_index_excl {
         let hour_start = file_start + chrono::Duration::hours(hour_index);
         let hour_end = hour_start + chrono::Duration::hours(1);
         let data_start = hour_start.max(info.recording_start);

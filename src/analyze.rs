@@ -94,22 +94,50 @@ pub fn analyze_ecl_with_source(
     max_windows: Option<usize>,
     provider: ExecutionProviderKind,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
-    // Fail-closed: uninstalled gate or meter deny rejects before any analyze output.
-    match crate::license::LicenseGate::try_global() {
-        None => {
-            return Err(crate::license::LicenseError::InferenceDenied(
-                "license gate not installed".into(),
-            )
-            .into());
-        }
-        Some(gate) => {
-            gate.ensure_inference_allowed()?;
-        }
-    }
-
-    let source_info = parse_ecl_filename(ecl_path)?;
+    ensure_inference_licensed()?;
     // Fail-fast on model source before reading the full ECL (Path missing / Embedded unavailable).
     let mut model = Phase2Model::load_from_source(model, provider)?;
+    analyze_ecl_with_loaded_model(ecl_path, &mut model, output_csv, max_windows)
+}
+
+/// Run the ECL pipeline with an already-loaded [`Phase2Model`] (HTTP resident session).
+///
+/// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
+pub fn analyze_ecl_with_model(
+    ecl_path: &Path,
+    model: &mut Phase2Model,
+    output_csv: &Path,
+    max_windows: Option<usize>,
+) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    ensure_inference_licensed()?;
+    analyze_ecl_with_loaded_model(ecl_path, model, output_csv, max_windows)
+}
+
+fn ensure_inference_licensed() -> Result<(), AnalyzeError> {
+    // Fail-closed: uninstalled gate or meter deny rejects before any analyze output.
+    match crate::license::LicenseGate::try_global() {
+        None => Err(crate::license::LicenseError::InferenceDenied(
+            "license gate not installed".into(),
+        )
+        .into()),
+        Some(gate) => {
+            gate.ensure_inference_allowed()?;
+            Ok(())
+        }
+    }
+}
+
+fn analyze_ecl_with_loaded_model(
+    ecl_path: &Path,
+    model: &mut Phase2Model,
+    output_csv: &Path,
+    max_windows: Option<usize>,
+) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    let source_info = parse_ecl_filename(ecl_path)?;
+    let ecl_name = ecl_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("<ecl>");
 
     let ecg_all_250 = read_ecl_adc_counts(ecl_path)?;
     eprintln!("[1/6] AI preprocessing ...");
@@ -120,11 +148,23 @@ pub fn analyze_ecl_with_source(
         starts.truncate(limit);
     }
 
+    // Window count follows the filename recording range (not the full ECL buffer),
+    // capped at MAX_RECORDING_DAYS (7). Example: 14:15–23:59 → ~2064 windows.
     eprintln!(
-        "[2/6] ONNX inference: windows={} requested_provider={} using_provider={}",
+        "[1/6] ECL {} recording {} .. {} -> valid_500={} starts={} (step={}s)",
+        ecl_name,
+        source_info.recording_start,
+        source_info.recording_end,
+        signal.ecg_valid_500.len(),
+        signal.starts_abs_500.len(),
+        crate::preprocess::STEP_SEC
+    );
+
+    eprintln!(
+        "[2/6] ONNX inference: windows={} using_provider={} (model resident={})",
         starts.len(),
-        provider,
-        model.provider()
+        model.provider(),
+        model.model_path().display()
     );
     let mut all_candidates = Vec::new();
     let mut rhythm_windows = Vec::new();
