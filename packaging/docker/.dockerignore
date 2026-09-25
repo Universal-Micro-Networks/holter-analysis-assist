@@ -1,0 +1,10 @@
+# Exclude raw model weights from the Docker build context.
+# Canonical copy lives here; build-docker.sh copies this file into the staging
+# context root as `.dockerignore` before `docker build` (Docker reads ignore
+# rules from the context root, not from the -f Dockerfile directory).
+
+resources/models
+resources/models/**
+**/resources/models/**
+**/*.onnx
+*.onnx
