@@ -30,7 +30,7 @@
   - _Depends: 1.2_
   - _Requirements: 1.1, 1.2, 1.4, 4.1, 5.1, 6.1, 7.1_
 
-- [ ] 2.2 (P) Windows 向けインストーラ定義を追加する
+- [x] 2.2 (P) Windows 向けインストーラ定義を追加する
   - Inno Setup により HTTP バイナリ・サンプル ini・NOTICE・短縮案内を導入先へ配置するインストーラ定義を追加する
   - Windows Service 登録や MSI／WiX は行わない
   - コンパイル失敗時は非 0 とし、サイレント成功にしない
