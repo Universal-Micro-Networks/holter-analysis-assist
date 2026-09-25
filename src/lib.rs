@@ -12,6 +12,9 @@ pub mod phase2;
 pub mod postprocess;
 pub mod preprocess;
 
+#[cfg(test)]
+mod model_source_resolution_matrix;
+
 pub use model_source::{ModelSource, ModelSourceError};
 
 use serde::{Deserialize, Serialize};
