@@ -48,9 +48,10 @@
 - **推移的契約（roadmap 上は http-api のみだが運用上必須）**:
   - `model-embedding` — 生モデル非同梱・埋め込みバイナリ契約。ジョブ `release-embedded-cli` は **消費対象外**（CLI 専用。本仕様は再定義しない）
   - `license-client` — `[license]` キー正本 `config/license.ini.example`。コピー／参照のみで意味変更禁止
+- **Existing Spec Update（`api-console-ui`）**: コンソール UI は同一 `holter-http-api` に埋め込み。追加フロント成果物は不要。正本 URL `/ui/`。本仕様は導入／スモーク文書への追記のみ（UI 実装・埋め込みは非所有）
 - 既存: `.github/workflows/ci.yml` の artifact download パターン
 - 新規ツール: Docker、Inno Setup 6.x、fpm（Ruby gem）、検証シェルスクリプト
-- 禁止: 生 `.onnx` の成果物追加、`[license]` / `[http]` キーの別名再発明、ライセンスサーバーコード取り込み、`release-embedded-cli` の再定義
+- 禁止: 生 `.onnx` の成果物追加、`[license]` / `[http]` キーの別名再発明、ライセンスサーバーコード取り込み、`release-embedded-cli` の再定義、別 UI アーティファクトの必須化
 
 ### Revalidation Triggers
 - 配布バイナリ名または必須同梱ファイル集合の変更
@@ -60,6 +61,7 @@
 - Inno / fpm パッケージ名またはインストール先パスの変更
 - CPU／CUDA バリアント命名規則の変更
 - 上流 artifact 名（`release-embedded-http-api`）または本仕様 packaging ジョブ名の変更
+- コンソール UI 正本 URL（`/ui/`）または「同一バイナリ埋め込み」契約の変更（`api-console-ui`）
 
 ## Architecture
 
@@ -456,10 +458,11 @@ flowchart LR
 
 | 方向 | 契約 | 出所 / 行き先 | 備考 |
 |------|------|---------------|------|
-| **Input** | 埋め込み HTTP バイナリ `holter-http-api` | http-api → artifact `release-embedded-http-api` | CPU 既定。生 `.onnx` は入力にも出力にも載せない |
+| **Input** | 埋め込み HTTP バイナリ `holter-http-api` | http-api → artifact `release-embedded-http-api` | CPU 既定。生 `.onnx` は入力にも出力にも載せない。`api-console-ui` 実装後はコンソール UI をバイナリ内に含む |
 | **Input** | `[license]` サンプル節 | `config/license.ini.example`（license-client） | コピー／参照のみ。キー正本は非所有 |
 | **Input** | `[http]` サンプル節 | http-api の example（例: `config/http.ini.example`） | コピー／参照のみ。キー正本は非所有 |
 | **Input** | NOTICE 正本 | 本仕様 `packaging/NOTICE`（ORT 等） | 成果物へ同梱必須 |
+| **Docs** | コンソール URL `/ui/` | api-console-ui → 導入／スモーク文書 | 追加フロント成果物は不要。Win/Linux 同一経路 |
 | **Output** | Docker イメージ（または tar） | 運用（Linux クラウド） | CPU 既定必須 |
 | **Output** | Inno Setup インストーラ EXE | 運用（Windows） | CPU 既定必須 |
 | **Output** | deb / rpm | 運用（Linux ホスト） | CPU 既定必須（両形式） |

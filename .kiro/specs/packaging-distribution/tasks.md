@@ -86,3 +86,13 @@
   - 完了条件: 運用者が追えるスモーク観点がリポジトリ内に残っている
   - _Depends: 3.1, 4.1_
   - _Requirements: 1.2, 2.2, 3.3, 9.1_
+
+- [ ] 5. Existing Spec Update: api-console-ui 同梱の文書追従
+- [ ] 5.1 導入・スモーク文書にコンソール UI（`/ui/`）を追記する
+  - 上流 `api-console-ui` により UI が同一 `holter-http-api` に埋め込まれる前提を導入ドキュメント（Docker／Windows／Linux）および手動スモーク観点へ追記する
+  - 追加のフロントエンド成果物や別 UI サーバーは不要であること、正本 URL は `/ui/`（Win/Linux 同一）を明示する
+  - Docker／Inno／fpm ビルダー本体の再設計や別 UI アーティファクト必須化は行わない
+  - 完了条件: 3 系統の導入文書またはスモークに `/ui/` と同一バイナリ配信の説明が追える
+  - _Boundary: InstallDocs_
+  - _Depends: 4.1_
+  - _Requirements: 9.1, 9.2, 9.3, 9.4_

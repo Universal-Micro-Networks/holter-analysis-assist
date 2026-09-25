@@ -26,10 +26,12 @@
   - ARM 等 x86_64 以外のターゲット
 - **Adjacent expectations**:
   - 上流 `http-api`: 埋め込みモデルを含むリリース用 HTTP バイナリを artifact `release-embedded-http-api`（埋め込み `holter-http-api`）として提供すること。`[http]` サンプル example を提供すること
+  - 上流 `api-console-ui`（Existing Spec Update）: 簡易コンソール UI は同一 `holter-http-api` バイナリに埋め込み配信され、追加のフロントエンド成果物を必須としない。正本 URL は `/ui/`（Windows／Linux 同一）
   - 上流 `model-embedding`: リリース成果物に生モデルを含めない埋め込み方針が適用済みであること。本仕様はジョブ `release-embedded-cli` を消費・再定義しない
   - 上流 `license-client`: `[license]` 正本 `config/license.ini.example` が利用可能であること。本仕様はコピー／参照（またはパッケージ時マージ）のみでキー意味を変更しない
-  - roadmap の直接依存は `http-api` のみだが、ini・埋め込み非同梱契約により `license-client` / `model-embedding` に **推移的に** 依存する
+  - roadmap の直接依存は `http-api` のみだが、ini・埋め込み非同梱契約により `license-client` / `model-embedding` に **推移的に** 依存する。コンソール UI の導入文書追従は `api-console-ui` 完了後
   - 既存 CI: `release-embedded-http-api` を入力として配布成果物を追加できること
+
 ## Requirements
 
 ### Requirement 1: Linux クラウド向けコンテナイメージ
@@ -128,6 +130,7 @@
 1. The Packaging Distribution System shall コンテナイメージ・Windows インストーラ・Linux パッケージそれぞれについて、導入手順と起動手順を文書化する
 2. The Packaging Distribution System shall インストール後にサンプル ini でライセンス URL 等を設定する手順を文書化する
 3. The Packaging Distribution System shall 対象を Windows x86_64 および Linux x86_64 に限定していることを文書上で明示する
+4. Where 上流 `api-console-ui` によりコンソール UI が同一バイナリに含まれる, the Packaging Distribution System shall 導入またはスモーク文書にコンソール正本 URL（`/ui/`）と追加フロント成果物が不要である旨を記載する
 
 ### Requirement 10: 責務境界の明確化
 
