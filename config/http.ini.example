@@ -7,6 +7,8 @@
 # Merge options for deployment:
 #   1. Append an [http] section to a copy of license.ini (keep [license] keys unchanged), or
 #   2. Keep separate files and pass each path to the HTTP / license loaders.
+# The `holter-http-api` binary expects one `--config` / HOLTER_HTTP_INI file that
+# contains both [http] and [license] (option 1). Default path: config/http.ini.
 # Do not invent alternate license key names (server_url, api_key, etc.).
 #
 # TLS / transport:
