@@ -5,6 +5,7 @@
 
 pub mod analyze;
 pub mod dsp;
+pub mod license;
 #[cfg(feature = "embedded-model")]
 pub mod embedded_model;
 pub mod model_source;
