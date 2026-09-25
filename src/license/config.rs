@@ -343,6 +343,30 @@ timeout_secs=abc
     }
 
     #[test]
+    fn loaded_ini_api_key_is_masked_in_debug() {
+        // Gap (task 5.1 / req 7.1, 7.3): mask must hold after round-trip load, not only
+        // when constructing LicenseConfig in memory.
+        let secret = "ini-loaded-secret-must-not-appear-in-debug";
+        let ini = write_ini(&format!(
+            "[license]\nserver_url=https://license.example.com\napi_key={secret}\n"
+        ));
+        let cfg = LicenseConfig::load_from_path(ini.path()).expect("load ini with api_key");
+        assert_eq!(
+            cfg.api_key.as_ref().map(SecretString::expose_secret),
+            Some(secret)
+        );
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains(secret),
+            "Debug after ini load must not contain plaintext api_key: {debug}"
+        );
+        assert!(
+            debug.contains("***"),
+            "Debug after ini load should show masked api_key: {debug}"
+        );
+    }
+
+    #[test]
     fn example_ini_is_canonical_license_section_with_permission_notes() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/license.ini.example");
         let body = std::fs::read_to_string(&path)

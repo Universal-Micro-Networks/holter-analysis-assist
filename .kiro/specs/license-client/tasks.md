@@ -70,7 +70,7 @@
   - _Depends: 3.2, 2.1_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 4.4, 5.1, 5.3, 8.2, 8.3, 9.1, 9.4_
 
-- [ ] 5. Validation: fail-closed と計上単位の自動検証
+- [x] 5. Validation: fail-closed と計上単位の自動検証
 - [ ] 5.1 設定・マスク・ゲートの単体テストを追加する
   - 必須キー欠落、同一キー読取、認証情報マスク、ゲートの成功/拒否、未 install の fail-closed を自動テストする
   - 完了条件: 該当単体テストが CI 相当の `cargo test` でパスする
