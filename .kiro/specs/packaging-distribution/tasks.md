@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Foundation: 配布共通資産と検証ゲートを用意する
+- [x] 1. Foundation: 配布共通資産と検証ゲートを用意する
 - [x] 1.1 NOTICE 正本と配布用サンプル ini の取り込みを追加する
   - ORT 等の第三者告知を含む NOTICE 正本をリポジトリに置く
   - `[license]` は `config/license.ini.example`（license-client）をコピー／参照する。キー正本を本仕様で所有しない
@@ -11,7 +11,7 @@
   - _Boundary: NoticeBundle, PackagingIniSample_
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 7.1, 7.2, 10.1, 10.2, 10.3, 10.4_
 
-- [ ] 1.2 共通ステージング組み立てと成果物検証を用意する
+- [x] 1.2 共通ステージング組み立てと成果物検証を用意する
   - 上流 `release-embedded-http-api` の埋め込み済み HTTP バイナリ・上流サンプル ini（コピー／マージ）・NOTICE を共通レイアウトへ集約する手順を用意する
   - 必須ファイル欠落、および生モデル拡張子（少なくとも `.onnx` 等）の混入を検出して失敗させる検証を用意する
   - 配布成果物が埋め込みバイナリ前提であることをレイアウト仕様上で明示する
