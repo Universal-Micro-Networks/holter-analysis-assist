@@ -1,9 +1,9 @@
 {
   "feature_name": "model-embedding",
   "created_at": "2026-09-25T01:30:02Z",
-  "updated_at": "2026-09-25T01:40:00Z",
+  "updated_at": "2026-09-25T02:36:21Z",
   "language": "ja",
-  "phase": "tasks-generated",
+  "phase": "implementation-complete",
   "approvals": {
     "requirements": {
       "generated": true,
