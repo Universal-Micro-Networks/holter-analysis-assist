@@ -5,7 +5,9 @@
 //! - input `ecg`: `(B, 10000, 1)` float32 NTC
 //! - outputs: `beat`, `event` `[PAC,PVC,N]`, `rhythm` (AF/AFL vs SR)
 
+use crate::model_source::{ModelSource, ModelSourceError};
 use ndarray::Array3;
+use ort::session::builder::SessionBuilder;
 use ort::session::Session;
 use ort::value::TensorRef;
 use serde::{Deserialize, Serialize};
@@ -129,6 +131,10 @@ impl WindowOutputs {
 pub enum InferError {
     #[error("ONNX model not found: {0}")]
     ModelNotFound(String),
+    #[error("model bytes are empty; cannot build inference session")]
+    EmptyModelBytes,
+    #[error(transparent)]
+    ModelSource(#[from] ModelSourceError),
     #[error("invalid ECG window: expected {expected} samples, got {got}")]
     InvalidWindow { expected: usize, got: usize },
     #[error("ort error: {0}")]
@@ -216,11 +222,69 @@ impl Phase2Model {
             return Err(InferError::ModelNotFound(path.display().to_string()));
         }
 
+        let path_buf = path.to_path_buf();
+        Self::resolve_provider(provider, |resolved| {
+            Self::commit_from_file_resolved(&path_buf, resolved)
+        })
+    }
+
+    /// Build a session from in-memory model bytes (same EP resolution as path load).
+    pub fn load_from_memory(
+        model_bytes: &[u8],
+        provider: ExecutionProviderKind,
+    ) -> Result<Self, InferError> {
+        ensure_ort_dylib_search_path();
+        if model_bytes.is_empty() {
+            return Err(InferError::EmptyModelBytes);
+        }
+        Self::resolve_provider(provider, |resolved| {
+            Self::commit_from_memory_resolved(model_bytes, resolved, PathBuf::from("<memory>"))
+        })
+    }
+
+    /// Resolve [`ModelSource`] to a session: Path → file, Embedded → embedded bytes.
+    pub fn load_from_source(
+        source: &ModelSource,
+        provider: ExecutionProviderKind,
+    ) -> Result<Self, InferError> {
+        source.ensure_supported()?;
+        match source {
+            ModelSource::Path(path) => Self::load_with_provider(path, provider),
+            ModelSource::Embedded => {
+                #[cfg(feature = "embedded-model")]
+                {
+                    let bytes = crate::embedded_model::embedded_model_bytes();
+                    if bytes.is_empty() {
+                        return Err(InferError::EmptyModelBytes);
+                    }
+                    ensure_ort_dylib_search_path();
+                    Self::resolve_provider(provider, |resolved| {
+                        Self::commit_from_memory_resolved(
+                            bytes,
+                            resolved,
+                            PathBuf::from("<embedded>"),
+                        )
+                    })
+                }
+                #[cfg(not(feature = "embedded-model"))]
+                {
+                    // `ensure_supported` already rejected Embedded without the feature.
+                    Err(InferError::ModelSource(ModelSourceError::EmbeddedUnavailable))
+                }
+            }
+        }
+    }
+
+    /// Shared auto/cpu/cuda fallback used by path and memory load paths.
+    fn resolve_provider<F>(provider: ExecutionProviderKind, load: F) -> Result<Self, InferError>
+    where
+        F: Fn(ExecutionProviderKind) -> Result<Self, InferError>,
+    {
         match provider {
             ExecutionProviderKind::Auto => {
                 let mut last_err: Option<InferError> = None;
                 for candidate in ExecutionProviderKind::auto_candidates() {
-                    match Self::load_resolved(path, *candidate) {
+                    match load(*candidate) {
                         Ok(model) => return Ok(model),
                         Err(err) => {
                             eprintln!(
@@ -230,18 +294,16 @@ impl Phase2Model {
                         }
                     }
                 }
-                Err(last_err.unwrap_or_else(|| {
-                    InferError::ProviderUnavailable("auto".into())
-                }))
+                Err(last_err
+                    .unwrap_or_else(|| InferError::ProviderUnavailable("auto".into())))
             }
-            other => Self::load_resolved(path, other),
+            other => load(other),
         }
     }
 
-    fn load_resolved(
-        path: &Path,
+    fn session_builder_for_provider(
         provider: ExecutionProviderKind,
-    ) -> Result<Self, InferError> {
+    ) -> Result<SessionBuilder, InferError> {
         debug_assert_ne!(provider, ExecutionProviderKind::Auto);
 
         let mut builder = Session::builder()?
@@ -272,11 +334,32 @@ impl Phase2Model {
                 }
             }
         }
+        Ok(builder)
+    }
 
+    fn commit_from_file_resolved(
+        path: &Path,
+        provider: ExecutionProviderKind,
+    ) -> Result<Self, InferError> {
+        let mut builder = Self::session_builder_for_provider(provider)?;
         let session = builder.commit_from_file(path)?;
         Ok(Self {
             session,
             model_path: path.to_path_buf(),
+            provider,
+        })
+    }
+
+    fn commit_from_memory_resolved(
+        model_bytes: &[u8],
+        provider: ExecutionProviderKind,
+        model_path: PathBuf,
+    ) -> Result<Self, InferError> {
+        let mut builder = Self::session_builder_for_provider(provider)?;
+        let session = builder.commit_from_memory(model_bytes)?;
+        Ok(Self {
+            session,
+            model_path,
             provider,
         })
     }
@@ -427,6 +510,16 @@ pub fn zscore_window_eps(samples: &mut [f32], eps: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_source::ModelSource;
+
+    fn smoke_samples() -> Vec<f32> {
+        let mut samples = vec![0.0_f32; WINDOW_SAMPLES];
+        for (i, s) in samples.iter_mut().enumerate() {
+            *s = ((i % 97) as f32) * 0.01 - 0.5;
+        }
+        zscore_window(&mut samples);
+        samples
+    }
 
     #[test]
     fn rhythm_threshold() {
@@ -451,6 +544,187 @@ mod tests {
     }
 
     #[test]
+    fn load_from_memory_rejects_empty_bytes() {
+        let result = Phase2Model::load_from_memory(&[], ExecutionProviderKind::Cpu);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("empty bytes must fail before inference"),
+        };
+        assert!(
+            matches!(err, InferError::EmptyModelBytes),
+            "empty bytes must fail before inference: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.to_ascii_lowercase().contains("empty")
+                || msg.contains("空")
+                || msg.contains("byte"),
+            "error should clearly mention empty bytes: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_from_source_missing_path_errors_before_infer() {
+        let missing = PathBuf::from("/tmp/holter-assist-missing-model-2-2.onnx");
+        let source = ModelSource::Path(missing.clone());
+        let result = Phase2Model::load_from_source(&source, ExecutionProviderKind::Cpu);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("missing path must error"),
+        };
+        assert!(
+            matches!(err, InferError::ModelNotFound(_)),
+            "missing path must be ModelNotFound: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(missing.to_string_lossy().as_ref()) || msg.contains("not found"),
+            "error should identify the missing path: {msg}"
+        );
+    }
+
+    #[cfg(not(feature = "embedded-model"))]
+    #[test]
+    fn load_from_source_embedded_unavailable_without_feature() {
+        let result = Phase2Model::load_from_source(
+            &ModelSource::Embedded,
+            ExecutionProviderKind::Cpu,
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("Embedded without feature must fail"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("embedded-model") || msg.contains("Embedded"),
+            "must clearly reject Embedded without feature: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_from_memory_builds_session_with_cpu_ep() {
+        let onnx = Path::new("resources/models/phase2_rev1.onnx");
+        if !onnx.exists() {
+            eprintln!("skip: ONNX not present at {}", onnx.display());
+            return;
+        }
+        let bytes = std::fs::read(onnx).expect("read onnx bytes");
+        let mut model =
+            Phase2Model::load_from_memory(&bytes, ExecutionProviderKind::Cpu).expect("memory load");
+        assert_eq!(model.provider(), ExecutionProviderKind::Cpu);
+        let out = model.infer_window(&smoke_samples()).expect("infer");
+        assert_eq!(out.beat.len(), WINDOW_SAMPLES);
+        assert_eq!(out.event.len(), WINDOW_SAMPLES);
+        assert!((0.0..=1.0).contains(&out.rhythm));
+    }
+
+    #[test]
+    fn path_and_memory_yield_same_output_contract() {
+        let onnx = Path::new("resources/models/phase2_rev1.onnx");
+        if !onnx.exists() {
+            eprintln!("skip: ONNX not present at {}", onnx.display());
+            return;
+        }
+        let bytes = std::fs::read(onnx).expect("read onnx bytes");
+        let samples = smoke_samples();
+
+        let mut from_path =
+            Phase2Model::load_with_provider(onnx, ExecutionProviderKind::Cpu).expect("path load");
+        let mut from_mem =
+            Phase2Model::load_from_memory(&bytes, ExecutionProviderKind::Cpu).expect("memory load");
+
+        let path_out = from_path.infer_window(&samples).expect("path infer");
+        let mem_out = from_mem.infer_window(&samples).expect("memory infer");
+
+        assert_eq!(path_out.beat.len(), mem_out.beat.len());
+        assert_eq!(path_out.event.len(), mem_out.event.len());
+        assert_eq!(path_out.beat.len(), WINDOW_SAMPLES);
+        assert_eq!(path_out.event.len(), WINDOW_SAMPLES);
+        // Same model bytes + same input → same scores (bit-identical float outputs).
+        assert_eq!(path_out.rhythm, mem_out.rhythm);
+        assert_eq!(path_out.beat, mem_out.beat);
+        assert_eq!(path_out.event, mem_out.event);
+        assert_eq!(path_out.summary_beat_class(), mem_out.summary_beat_class());
+        assert_eq!(path_out.rhythm_class(), mem_out.rhythm_class());
+    }
+
+    #[test]
+    fn load_from_source_path_matches_load_with_provider() {
+        let onnx = Path::new("resources/models/phase2_rev1.onnx");
+        if !onnx.exists() {
+            eprintln!("skip: ONNX not present at {}", onnx.display());
+            return;
+        }
+        let source = ModelSource::Path(onnx.to_path_buf());
+        let mut via_source =
+            Phase2Model::load_from_source(&source, ExecutionProviderKind::Cpu).expect("source");
+        let mut via_path =
+            Phase2Model::load_with_provider(onnx, ExecutionProviderKind::Cpu).expect("path");
+        let samples = smoke_samples();
+        let a = via_source.infer_window(&samples).expect("source infer");
+        let b = via_path.infer_window(&samples).expect("path infer");
+        assert_eq!(a.rhythm, b.rhythm);
+        assert_eq!(a.beat, b.beat);
+        assert_eq!(a.event, b.event);
+    }
+
+    #[cfg(feature = "embedded-model")]
+    #[test]
+    fn load_from_source_embedded_builds_session() {
+        let mut model = Phase2Model::load_from_source(
+            &ModelSource::Embedded,
+            ExecutionProviderKind::Cpu,
+        )
+        .expect("embedded load_from_source");
+        assert_eq!(model.provider(), ExecutionProviderKind::Cpu);
+        assert_eq!(
+            model.model_path().to_string_lossy(),
+            "<embedded>",
+            "Embedded source should use placeholder path label"
+        );
+        let out = model.infer_window(&smoke_samples()).expect("infer");
+        assert_eq!(out.beat.len(), WINDOW_SAMPLES);
+        assert_eq!(out.event.len(), WINDOW_SAMPLES);
+        assert!((0.0..=1.0).contains(&out.rhythm));
+    }
+
+    #[cfg(feature = "embedded-model")]
+    #[test]
+    fn embedded_and_path_same_contract_when_same_bytes() {
+        let onnx = Path::new("resources/models/phase2_rev1.onnx");
+        if !onnx.exists() {
+            eprintln!("skip: ONNX not present at {}", onnx.display());
+            return;
+        }
+        // When HOLTER_EMBEDDED_MODEL_PATH pointed at the same file used for Path,
+        // both routes must yield identical output contract / scores.
+        let embedded = crate::embedded_model::embedded_model_bytes();
+        let file_bytes = std::fs::read(onnx).expect("read onnx");
+        if embedded != file_bytes.as_slice() {
+            eprintln!(
+                "skip: embedded bytes differ from {}; rebuild with HOLTER_EMBEDDED_MODEL_PATH pointing at it",
+                onnx.display()
+            );
+            return;
+        }
+        let samples = smoke_samples();
+        let mut from_emb = Phase2Model::load_from_source(
+            &ModelSource::Embedded,
+            ExecutionProviderKind::Cpu,
+        )
+        .expect("embedded");
+        let mut from_path =
+            Phase2Model::load_with_provider(onnx, ExecutionProviderKind::Cpu).expect("path");
+        let emb_out = from_emb.infer_window(&samples).expect("emb infer");
+        let path_out = from_path.infer_window(&samples).expect("path infer");
+        assert_eq!(emb_out.rhythm, path_out.rhythm);
+        assert_eq!(emb_out.beat, path_out.beat);
+        assert_eq!(emb_out.event, path_out.event);
+        assert_eq!(emb_out.summary_beat_class(), path_out.summary_beat_class());
+        assert_eq!(emb_out.rhythm_class(), path_out.rhythm_class());
+    }
+
+    #[test]
     fn infer_requires_exact_window_len() {
         let onnx = Path::new("resources/models/phase2_rev1.onnx");
         if !onnx.exists() {
@@ -470,12 +744,7 @@ mod tests {
             return;
         }
         let mut model = Phase2Model::load(onnx).expect("load onnx");
-        let mut samples = vec![0.0_f32; WINDOW_SAMPLES];
-        for (i, s) in samples.iter_mut().enumerate() {
-            *s = ((i % 97) as f32) * 0.01 - 0.5;
-        }
-        zscore_window(&mut samples);
-        let out = model.infer_window(&samples).expect("infer");
+        let out = model.infer_window(&smoke_samples()).expect("infer");
         assert_eq!(out.beat.len(), WINDOW_SAMPLES);
         assert_eq!(out.event.len(), WINDOW_SAMPLES);
         assert!((0.0..=1.0).contains(&out.rhythm));
