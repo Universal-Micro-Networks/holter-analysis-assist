@@ -36,7 +36,7 @@
   - _Depends: 1.2, 2.1_
   - _Requirements: 1.1, 1.2, 1.3, 3.3, 4.3_
 
-- [ ] 3. Integration: 解析パイプラインと CLI をソース切替対応にする
+- [x] 3. Integration: 解析パイプラインと CLI をソース切替対応にする
 - [x] 3.1 ECL 解析エントリをモデルソース対応にする
   - 正規公開入口 `analyze_ecl_with_source` を追加し、`ModelSource` 経由でロードする
   - 既存の `analyze_ecl` / `analyze_ecl_with_limit` は Path → `ModelSource::Path` の薄い互換ラッパとする
@@ -46,7 +46,7 @@
   - _Depends: 2.2_
   - _Requirements: 1.3, 4.1_
 
-- [ ] 3.2 CLI の既定モデルソース解決を実装する
+- [x] 3.2 CLI の既定モデルソース解決を実装する
   - `--model` 指定時は常に Path を使う
   - 未指定かつ埋め込みビルドでは Embedded を使う
   - 未指定かつ非埋め込みビルドでは現行の開発用デフォルトパスを使う

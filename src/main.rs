@@ -1,11 +1,27 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use holter_analysis_assist::analyze::analyze_ecl_with_limit;
+use holter_analysis_assist::analyze::analyze_ecl_with_source;
 use holter_analysis_assist::phase2::{self, ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
-use holter_analysis_assist::{classify_ecg, ClassificationResult};
+use holter_analysis_assist::{classify_ecg, ClassificationResult, ModelSource};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// Development default when `--model` is omitted and `embedded-model` is off.
+const DEFAULT_DEV_MODEL: &str = "resources/models/phase2_rev1.onnx";
+
+/// Resolve CLI `--model` into a [`ModelSource`] (CliModelSelect).
+///
+/// - `Some(path)` → always [`ModelSource::Path`]
+/// - `None` + `embedded-model` feature → [`ModelSource::Embedded`]
+/// - `None` without feature → Path to [`DEFAULT_DEV_MODEL`]
+fn resolve_model_source(model: Option<PathBuf>) -> ModelSource {
+    match model {
+        Some(path) => ModelSource::Path(path),
+        None if cfg!(feature = "embedded-model") => ModelSource::Embedded,
+        None => ModelSource::Path(PathBuf::from(DEFAULT_DEV_MODEL)),
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,9 +49,10 @@ enum Commands {
 
     /// Run Phase-2 ONNX inference on one 20s @ 500Hz window (10_000 float32 samples).
     InferWindow {
-        /// ONNX model path (default: resources/models/phase2_rev1.onnx).
-        #[arg(long, default_value = "resources/models/phase2_rev1.onnx")]
-        model: PathBuf,
+        /// ONNX model path. Omitted: embedded model (embedded-model build) or
+        /// `resources/models/phase2_rev1.onnx` (development default).
+        #[arg(long)]
+        model: Option<PathBuf>,
 
         /// Raw float32 little-endian window file (40_000 bytes). If omitted, uses a synthetic sine.
         #[arg(long)]
@@ -59,9 +76,10 @@ enum Commands {
         #[arg(value_name = "ECL")]
         ecl: PathBuf,
 
-        /// Phase-2 ONNX model.
-        #[arg(long, default_value = "resources/models/phase2_rev1.onnx")]
-        model: PathBuf,
+        /// Phase-2 ONNX model path. Omitted: embedded model (embedded-model build) or
+        /// `resources/models/phase2_rev1.onnx` (development default).
+        #[arg(long)]
+        model: Option<PathBuf>,
 
         /// Output CSV path.
         #[arg(long, default_value = "output/beat_results.csv")]
@@ -142,44 +160,44 @@ fn main() -> ExitCode {
             zscore,
             format,
             provider,
-        } => match run_infer_window(model, input, zscore, format, provider.into()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("error: {err}");
-                ExitCode::FAILURE
+        } => {
+            let source = resolve_model_source(model);
+            match run_infer_window(source, input, zscore, format, provider.into()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
         Commands::AnalyzeEcl {
             ecl,
             model,
             output,
             max_windows,
             provider,
-        } => match analyze_ecl_with_limit(
-            &ecl,
-            &model,
-            &output,
-            max_windows,
-            provider.into(),
-        ) {
-            Ok((_rows, summary)) => {
-                println!("saved: {}", output.display());
-                println!("beats: {}", summary.beats);
-                println!("windows: {}", summary.windows);
-                println!("Unknown=1: {}", summary.unknown_ones);
-                println!("short_run_flag=1: {}", summary.short_run_ones);
-                ExitCode::SUCCESS
+        } => {
+            let source = resolve_model_source(model);
+            match analyze_ecl_with_source(&ecl, &source, &output, max_windows, provider.into()) {
+                Ok((_rows, summary)) => {
+                    println!("saved: {}", output.display());
+                    println!("beats: {}", summary.beats);
+                    println!("windows: {}", summary.windows);
+                    println!("Unknown=1: {}", summary.unknown_ones);
+                    println!("short_run_flag=1: {}", summary.short_run_ones);
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
             }
-            Err(err) => {
-                eprintln!("error: {err}");
-                ExitCode::FAILURE
-            }
-        },
+        }
     }
 }
 
 fn run_infer_window(
-    model_path: PathBuf,
+    source: ModelSource,
     input: Option<PathBuf>,
     zscore: bool,
     format: OutputFormat,
@@ -193,7 +211,7 @@ fn run_infer_window(
         phase2::zscore_window(&mut samples);
     }
 
-    let mut model = Phase2Model::load_with_provider(&model_path, provider)?;
+    let mut model = Phase2Model::load_from_source(&source, provider)?;
     let resolved = model.provider();
     let out = model.infer_window(&samples)?;
 
@@ -206,7 +224,7 @@ fn run_infer_window(
     }
     let n = out.event.len() as f32;
     let report = InferWindowReport {
-        model: model_path.display().to_string(),
+        model: model.model_path().display().to_string(),
         provider: resolved.as_str().to_string(),
         rhythm_score: out.rhythm,
         rhythm_class: out.rhythm_class().as_str().to_string(),
@@ -285,5 +303,51 @@ fn print_classify(result: &ClassificationResult, format: OutputFormat) {
                 serde_json::to_string_pretty(result).expect("serialize ClassificationResult")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_model_select_tests {
+    use super::*;
+
+    #[test]
+    fn specified_model_always_path() {
+        let path = PathBuf::from("/tmp/custom.onnx");
+        let src = resolve_model_source(Some(path.clone()));
+        assert_eq!(src, ModelSource::Path(path));
+    }
+
+    #[cfg(not(feature = "embedded-model"))]
+    #[test]
+    fn unspecified_without_feature_uses_dev_default_path() {
+        let src = resolve_model_source(None);
+        assert_eq!(
+            src,
+            ModelSource::Path(PathBuf::from(DEFAULT_DEV_MODEL)),
+            "non-embedded build must keep development default path"
+        );
+    }
+
+    #[cfg(feature = "embedded-model")]
+    #[test]
+    fn unspecified_with_feature_uses_embedded() {
+        let src = resolve_model_source(None);
+        assert_eq!(
+            src,
+            ModelSource::Embedded,
+            "embedded-model build must default to Embedded when --model omitted"
+        );
+    }
+
+    #[cfg(feature = "embedded-model")]
+    #[test]
+    fn specified_model_overrides_embedded_default() {
+        let path = PathBuf::from("resources/models/override.onnx");
+        let src = resolve_model_source(Some(path.clone()));
+        assert_eq!(
+            src,
+            ModelSource::Path(path),
+            "--model must always win over Embedded default"
+        );
     }
 }
