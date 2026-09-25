@@ -5,6 +5,8 @@
 
 pub mod analyze;
 pub mod dsp;
+#[cfg(feature = "embedded-model")]
+pub mod embedded_model;
 pub mod phase2;
 pub mod postprocess;
 pub mod preprocess;
@@ -112,5 +114,19 @@ mod tests {
         let result = classify_ecg(file.path()).unwrap();
         assert_eq!(result.label, RhythmLabel::Normal);
         assert_eq!(result.confidence, 0.0);
+    }
+}
+
+/// Feature-off: embedded source API must not be selectable (module not compiled).
+#[cfg(all(test, not(feature = "embedded-model")))]
+mod embedded_model_feature_off_tests {
+    #[test]
+    fn embedded_model_api_not_available_without_feature() {
+        // `pub mod embedded_model` is cfg-gated; without the feature the module path
+        // does not exist, so callers cannot select an embedded source at compile time.
+        assert!(
+            !cfg!(feature = "embedded-model"),
+            "default / feature-off builds must not enable embedded-model"
+        );
     }
 }
