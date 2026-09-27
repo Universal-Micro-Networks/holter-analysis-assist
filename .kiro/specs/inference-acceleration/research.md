@@ -93,7 +93,7 @@
 ### Decision: 比較ツールは CLI サブコマンド + 観測フック
 - **Context**: 埋め込みモデル配布ビルドでも比較可能にする／公開 gated 入口を増やさない。
 - **Selected Approach**: `holter-analysis-assist compare-accel`。基準・候補のモデルを各 1 回ロードし、各 ECL を既存ゲート経由で 2 回解析。基準実行時に crate 内部フックでウィンドウ出力を保持し、候補実行時に逐次差分を取る（追加推論なし）。
-- **Trade-offs**: 基準のウィンドウ出力保持にメモリ（丸 1 日 ≈ 330 MB）。`--prob-stride` で間引き可能。
+- **Trade-offs**: 基準のウィンドウ出力保持にメモリ（1 ウィンドウ ≈ 160 KB、丸 1 日 ≈ 800 MB、7 日 ≈ 5.7 GB。実装時に再見積り）。`--prob-stride` で間引き可能。
 
 ### Generalization / Build vs Adopt / Simplification
 - **Generalization**: `InferenceOptions`（provider + まとめ件数 + CUDA チューニング）を CLI・HTTP・比較ツール共通の単一型にし、同じパーサで値体系を統一（Req 6.1）。

@@ -507,10 +507,10 @@ pub struct AnalyzeSummary { pub beats: usize, pub unknown_ones: usize, pub short
 - Trigger: CLI `holter-analysis-assist compare-accel <ECL>...`（CLI 起動時ライセンス確認後）
 - Input / validation: ECL 1 件以上、`ModelSource`（`--model` 省略時は既存規則: 埋め込み or 開発既定パス）、候補 `InferenceOptions`、`tolerance_samples`（既定 40 = 80 ms）、`prob_stride`（既定 1）、任意の `Thresholds`、`max_windows`、`report_dir`（既定 `output/accel_compare`）
 - 処理順: (1) 候補モデルをロード（失敗なら中止し理由を表示、5.7）→ (2) 基準モデルをロード → (3) ECL ごとに基準を観測付きで解析（リズムスコア全窓、`prob_stride` ごとの beat/event を保持）→ 候補を観測付きで解析し逐次差分 → 行同士を比較 → (4) 集計・レポート出力
-- Output / destination: `report_dir/report.json`, `report_dir/report.md`（stdout にも Markdown）、ECL ごとの `baseline.csv` / `candidate.csv`
+- Output / destination: `report_dir/report.json`, `report_dir/report.md`（stdout にも Markdown）、ECL ごとの `report_dir/<ECL 名>/baseline.csv` / `candidate.csv`（同名 ECL は `_2` などを付けて区別）
 - 計上: 各解析は正本のゲートを通るため、ECL 1 件につき 2 回計上（文書に明記）
 - Idempotency & recovery: 出力は上書き。途中失敗は非 0 終了（既に書いたファイルは残る）
-- 終了コード: 0 = 成功、1 = エラー、2 = 指定閾値のいずれかが不合格
+- 終了コード: 0 = 成功、1 = エラー、2 = 指定閾値のいずれかが不合格。ただし clap の引数エラーも 2 で終了するため、2 だけでは閾値不合格と区別できない（CLI ヘルプと手順書に明記）
 
 ```rust
 pub struct CompareConfig {
@@ -525,6 +525,8 @@ pub enum CompareError {
     #[error(transparent)] Analyze(#[from] AnalyzeError),
     #[error(transparent)] Infer(#[from] InferError),
     #[error(transparent)] Io(#[from] std::io::Error),
+    #[error(transparent)] Metrics(#[from] MetricsError), // beat_time の解析失敗
+    #[error("{0}")] Config(String),                      // 比較設定の不正
 }
 ```
 
@@ -567,7 +569,8 @@ pub struct Thresholds {
     pub min_beat_class_agreement: Option<f64>, pub max_prob_abs_diff: Option<f64>,
     pub max_offset_samples: Option<f64>,
 }
-pub struct Verdict { pub checks: Vec<(String, f64, f64, bool)>, pub passed: bool } // 指標名, 実測, 閾値, 合否
+pub struct ThresholdCheck { pub metric: String, pub actual: f64, pub threshold: f64, pub passed: bool }
+pub struct Verdict { pub checks: Vec<ThresholdCheck>, pub passed: bool }
 pub struct CompareReport { pub baseline: ConfigInfo, pub candidate: ConfigInfo, pub files: Vec<FileReport>, pub aggregate: AggregateReport, pub verdict: Option<Verdict> }
 pub fn to_json(report: &CompareReport) -> String;
 pub fn to_markdown(report: &CompareReport) -> String;
@@ -618,7 +621,7 @@ pub fn to_markdown(report: &CompareReport) -> String;
 - 設定値の不正（2.6, 4.4）: CLI は clap の引数エラー（ライセンス確認前に終了）、HTTP は `HttpConfigError` で起動拒否。メッセージにキー名・受理値・入力値を含める。
 - 実行時の不整合（4.3, 固定バッチでのクランプ）: 失敗にせず `EffectiveInference.notes` に警告を積み stderr に出す。
 - プロバイダ不可: 既存どおり明示 `cuda` はエラー、`auto` は CPU へ。比較ツールは候補ロード失敗で `CandidateUnavailable`（5.7）。
-- CUDA Graph 捕捉失敗: `InferError::CudaGraph`。CLI は解析失敗、HTTP は暖機で失敗し起動しない。メッセージで `cuda_graph=false` を案内。
+- CUDA Graph 捕捉失敗: `InferError::CudaGraph`。CLI は解析失敗、HTTP は暖機で失敗し起動しない。メッセージで `cuda_graph=false` を案内。ただし `provider=auto` でセッション生成時（固定バッファ実行経路の作成時）に失敗した場合は、既存のプロバイダ解決により CPU へフォールバックする。
 - GPU メモリ不足: `InferError::Ort` として伝播。HTTP は暖機で検出。
 
 ### Monitoring
@@ -655,7 +658,7 @@ pub fn to_markdown(report: &CompareReport) -> String;
 
 ## Performance & Scalability
 - まとめ件数上限 256、既定 16。実効件数と GPU メモリの関係は計測手順で確認する。
-- 比較ツールの基準ウィンドウ保持は丸 1 日で約 330 MB（`prob_stride=1`）。複数日 ECL では `--prob-stride` で間引く。
+- 比較ツールの基準ウィンドウ保持は 1 ウィンドウ約 160 KB で、丸 1 日で約 800 MB、7 日で約 5.7 GB（`prob_stride=1`）。複数日 ECL では `--prob-stride` で間引く。
 - CUDA Graph 時の端数詰め物による無駄計算は最大 `batch_size - 1` 窓。
 
 ## Migration Strategy
