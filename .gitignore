@@ -34,6 +34,8 @@ resources/models/**
 !resources/models/*.onnx.json
 *.h5
 *.onnx
+# Tiny synthetic test fixtures (no trained weights; see tests/fixtures/README.md)
+!tests/fixtures/*.onnx
 *.pt
 *.pth
 *.safetensors

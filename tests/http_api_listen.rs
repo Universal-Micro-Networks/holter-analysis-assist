@@ -141,7 +141,11 @@ impl Default for IniOpts<'static> {
     fn default() -> Self {
         Self {
             max_body_bytes: 1_048_576,
-            model_path: "/tmp/holter-http-api-listen-missing.onnx",
+            // The server loads the model at startup; use the git-tracked synthetic fixture.
+            model_path: concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/phase2_tiny_dynamic.onnx"
+            ),
             request_timeout_secs: 30,
         }
     }
@@ -403,7 +407,7 @@ fn analyze_request_meters_once_via_canonical_entry() {
     let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", b"placeholder");
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
-    // Missing ONNX / placeholder ECL fails after license meter inside canonical entry.
+    // Placeholder ECL fails after license meter inside canonical entry.
     assert!(
         status == 500 || status == 400 || status == 403,
         "expected post-meter failure status, got {status}; body={}",
