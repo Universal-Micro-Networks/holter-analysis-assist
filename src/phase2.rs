@@ -13,6 +13,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod batch_plan;
@@ -142,6 +143,8 @@ pub enum InferError {
     ModelSource(#[from] ModelSourceError),
     #[error("invalid ECG window: expected {expected} samples, got {got}")]
     InvalidWindow { expected: usize, got: usize },
+    #[error("invalid batch: {count} windows requested, expected 1..={max}")]
+    InvalidBatch { count: usize, max: usize },
     #[error("ort error: {0}")]
     Ort(#[from] ort::Error),
     #[error("missing ONNX output: {0}")]
@@ -488,35 +491,82 @@ impl Phase2Model {
 
     /// Run inference on one preprocessed window (`WINDOW_SAMPLES` float32 samples).
     pub fn infer_window(&mut self, samples: &[f32]) -> Result<WindowOutputs, InferError> {
-        if samples.len() != WINDOW_SAMPLES {
+        let mut outputs = self.infer_batch(samples, 1)?;
+        Ok(outputs.remove(0))
+    }
+
+    /// Run `count` consecutive windows (`count * WINDOW_SAMPLES` samples) in one
+    /// inference call; returns `count` outputs in input order (padding dropped).
+    pub fn infer_batch(
+        &mut self,
+        windows: &[f32],
+        count: usize,
+    ) -> Result<Vec<WindowOutputs>, InferError> {
+        let max = self.batch_size();
+        if count == 0 || count > max {
+            return Err(InferError::InvalidBatch { count, max });
+        }
+        let expected = count * WINDOW_SAMPLES;
+        if windows.len() != expected {
             return Err(InferError::InvalidWindow {
-                expected: WINDOW_SAMPLES,
-                got: samples.len(),
+                expected,
+                got: windows.len(),
             });
         }
 
-        let input = Array3::from_shape_vec((1, WINDOW_SAMPLES, INPUT_CHANNELS), samples.to_vec())
-            .expect("shape matches length");
+        let run_count = if self.effective.pad_tail { max } else { count };
+        let input = Array3::from_shape_vec(
+            (run_count, WINDOW_SAMPLES, INPUT_CHANNELS),
+            padded_input(windows, run_count),
+        )
+        .expect("shape matches length");
 
         let outputs = self.session.run(ort::inputs![
             INPUT_NAME => TensorRef::from_array_view(&input)?
         ])?;
 
-        let beat = extract_named_1d(&outputs, "beat", WINDOW_SAMPLES)?;
-        let event_flat = extract_named_flat(&outputs, "event", WINDOW_SAMPLES * 3)?;
-        let mut event = Vec::with_capacity(WINDOW_SAMPLES);
-        for chunk in event_flat.chunks_exact(3) {
-            event.push([chunk[0], chunk[1], chunk[2]]);
-        }
-        let rhythm_vec = extract_named_flat(&outputs, "rhythm", 1)?;
-        let rhythm = rhythm_vec[0];
+        let beat = extract_named_flat(&outputs, "beat", run_count * WINDOW_SAMPLES)?;
+        let event = extract_named_flat(&outputs, "event", run_count * WINDOW_SAMPLES * 3)?;
+        let rhythm = extract_named_flat(&outputs, "rhythm", run_count)?;
+        Ok(split_window_outputs(&beat, &event, &rhythm, count))
+    }
 
-        Ok(WindowOutputs {
-            beat,
-            event,
+    /// One inference over `batch_size()` zero windows; returns its wall time.
+    pub fn warm_up(&mut self) -> Result<Duration, InferError> {
+        let count = self.batch_size();
+        let zeros = vec![0.0_f32; count * WINDOW_SAMPLES];
+        let start = Instant::now();
+        self.infer_batch(&zeros, count)?;
+        Ok(start.elapsed())
+    }
+}
+
+/// Copy `windows` and zero-fill up to `run_count` windows.
+fn padded_input(windows: &[f32], run_count: usize) -> Vec<f32> {
+    let mut input = Vec::with_capacity(run_count * WINDOW_SAMPLES);
+    input.extend_from_slice(windows);
+    input.resize(run_count * WINDOW_SAMPLES, 0.0);
+    input
+}
+
+/// Slice flat `beat [B,10000,1]`, `event [B,10000,3]`, `rhythm [B,1]` into the
+/// first `count` windows.
+fn split_window_outputs(
+    beat: &[f32],
+    event: &[f32],
+    rhythm: &[f32],
+    count: usize,
+) -> Vec<WindowOutputs> {
+    beat.chunks_exact(WINDOW_SAMPLES)
+        .zip(event.chunks_exact(WINDOW_SAMPLES * 3))
+        .zip(rhythm)
+        .take(count)
+        .map(|((beat, event), &rhythm)| WindowOutputs {
+            beat: beat.to_vec(),
+            event: event.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
             rhythm,
         })
-    }
+        .collect()
 }
 
 /// Pass only the specified tuning values; `None` keeps the ONNX Runtime default.
@@ -560,15 +610,6 @@ fn model_batch_shape(session: &Session) -> Result<ModelBatchShape, InferError> {
             detail: "input has no batch dimension".into(),
         }),
     }
-}
-
-fn extract_named_1d(
-    outputs: &ort::session::SessionOutputs<'_>,
-    name: &'static str,
-    expected_len: usize,
-) -> Result<Vec<f32>, InferError> {
-    let data = extract_named_flat(outputs, name, expected_len)?;
-    Ok(data)
 }
 
 /// Ensure ort EP shared libraries are loadable when the binary lives under
@@ -1125,6 +1166,46 @@ mod tests {
         assert_eq!(model.effective().provider, ExecutionProviderKind::Cpu);
         assert_eq!(model.effective().requested_batch_size, DEFAULT_BATCH_SIZE);
         assert!(model.batch_size() >= 1);
+    }
+
+    #[test]
+    fn padded_input_zero_fills_to_run_count() {
+        let windows: Vec<f32> = (0..2 * WINDOW_SAMPLES).map(|i| i as f32 + 1.0).collect();
+        let padded = padded_input(&windows, 4);
+        assert_eq!(padded.len(), 4 * WINDOW_SAMPLES);
+        assert_eq!(&padded[..2 * WINDOW_SAMPLES], windows.as_slice());
+        assert!(padded[2 * WINDOW_SAMPLES..].iter().all(|&v| v == 0.0));
+        assert_eq!(padded_input(&windows, 2), windows);
+    }
+
+    #[test]
+    fn split_window_outputs_slices_contiguously_and_drops_padding() {
+        let run_count = 4;
+        let beat: Vec<f32> = (0..run_count * WINDOW_SAMPLES).map(|i| i as f32).collect();
+        let event: Vec<f32> = (0..run_count * WINDOW_SAMPLES * 3)
+            .map(|i| -(i as f32))
+            .collect();
+        let rhythm = [0.1_f32, 0.2, 0.3, 0.4];
+        let out = split_window_outputs(&beat, &event, &rhythm, 3);
+        assert_eq!(out.len(), 3);
+        for (k, w) in out.iter().enumerate() {
+            assert_eq!(
+                w.beat.as_slice(),
+                &beat[k * WINDOW_SAMPLES..(k + 1) * WINDOW_SAMPLES]
+            );
+            assert_eq!(w.event.len(), WINDOW_SAMPLES);
+            let base = k * WINDOW_SAMPLES * 3;
+            assert_eq!(w.event[0], [event[base], event[base + 1], event[base + 2]]);
+            assert_eq!(
+                w.event[WINDOW_SAMPLES - 1],
+                [
+                    event[base + 3 * WINDOW_SAMPLES - 3],
+                    event[base + 3 * WINDOW_SAMPLES - 2],
+                    event[base + 3 * WINDOW_SAMPLES - 1]
+                ]
+            );
+            assert_eq!(w.rhythm, rhythm[k]);
+        }
     }
 
     #[test]
