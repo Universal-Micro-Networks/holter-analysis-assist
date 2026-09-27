@@ -60,6 +60,10 @@
 
 - [x] api-console-ui -- API 疎通・単発解析用の簡易ブラウザ UI（同一バイナリ＋静的 HTML/JS。SPA なし）。Dependencies: http-api
 
+### Phase 3 — 推論高速化
+
+- [ ] inference-acceleration -- 段階別計測・ウィンドウまとめ処理・HTTP モデル常駐/暖機・CUDA チューニング・CPU FP32 基準の精度/速度比較レポート（TensorRT / FP16 は範囲外）。Dependencies: model-embedding, http-api
+
 ## Existing Spec Updates
 
 - [x] packaging-distribution -- `api-console-ui` アセット／ルートを配布成果物に同梱するよう追記。Dependencies: api-console-ui
