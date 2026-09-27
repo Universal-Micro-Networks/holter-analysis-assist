@@ -63,13 +63,23 @@ impl fmt::Debug for LicenseConfig {
     }
 }
 
+/// Ini parse options shared by `[license]` and `[http]` loaders.
+///
+/// Escapes are disabled so Windows paths such as `C:\Users\...` survive as-is.
+pub(crate) fn verbatim_ini_option() -> ini::ParseOption {
+    ini::ParseOption {
+        enabled_escape: false,
+        ..ini::ParseOption::default()
+    }
+}
+
 impl LicenseConfig {
     /// Load and validate `[license]` settings from `path`.
     ///
     /// Fail-closed: missing file, missing section/keys, invalid URL, or non-positive
     /// timeout yield [`LicenseError::Config`].
     pub fn load_from_path(path: &Path) -> Result<Self, LicenseError> {
-        let ini = ini::Ini::load_from_file(path).map_err(|e| {
+        let ini = ini::Ini::load_from_file_opt(path, verbatim_ini_option()).map_err(|e| {
             LicenseError::Config(format!(
                 "failed to read license ini {}: {e}",
                 path.display()
@@ -241,6 +251,21 @@ meter_path=/custom/meter
         assert_eq!(cfg.timeout, Duration::from_secs(30));
         assert_eq!(cfg.check_path, "/custom/check");
         assert_eq!(cfg.meter_path, "/custom/meter");
+    }
+
+    #[test]
+    fn backslashes_in_values_are_kept_verbatim() {
+        let ini = write_ini(
+            r#"[license]
+server_url=http://127.0.0.1:9000
+api_key=ab\tc\nd
+"#,
+        );
+        let cfg = LicenseConfig::load_from_path(ini.path()).expect("ini with backslashes");
+        assert_eq!(
+            cfg.api_key.as_ref().map(SecretString::expose_secret),
+            Some(r"ab\tc\nd")
+        );
     }
 
     #[test]

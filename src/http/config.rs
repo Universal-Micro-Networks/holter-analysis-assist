@@ -48,9 +48,10 @@ impl HttpConfig {
     /// A colocated `[license]` section is ignored here; load it with the
     /// upstream [`crate::license::LicenseConfig`] using the same key names.
     pub fn load_from_path(path: &Path) -> Result<Self, HttpConfigError> {
-        let ini = ini::Ini::load_from_file(path).map_err(|e| {
-            HttpConfigError::Config(format!("failed to read http ini {}: {e}", path.display()))
-        })?;
+        let ini = ini::Ini::load_from_file_opt(path, crate::license::verbatim_ini_option())
+            .map_err(|e| {
+                HttpConfigError::Config(format!("failed to read http ini {}: {e}", path.display()))
+            })?;
 
         let section = ini.section(Some(SECTION)).ok_or_else(|| {
             HttpConfigError::Config(format!("missing [{SECTION}] section in {}", path.display()))
@@ -240,6 +241,21 @@ provider=cpu
             Some(std::path::Path::new("/tmp/dev-model.onnx"))
         );
         assert_eq!(cfg.provider, ExecutionProviderKind::Cpu);
+    }
+
+    #[test]
+    fn windows_backslash_model_path_is_kept_verbatim() {
+        let ini = write_ini(
+            r#"[http]
+bind=127.0.0.1:8080
+model_path=C:\Users\tadas\models\test.onnx
+"#,
+        );
+        let cfg = HttpConfig::load_from_path(ini.path()).expect("windows path ini");
+        assert_eq!(
+            cfg.model_path.as_deref(),
+            Some(std::path::Path::new(r"C:\Users\tadas\models\test.onnx"))
+        );
     }
 
     #[test]

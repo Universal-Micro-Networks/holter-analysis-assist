@@ -11,6 +11,7 @@ mod http;
 mod types;
 
 pub use client::{LicenseClient, MockLicenseClient, MockOutcome};
+pub(crate) use config::verbatim_ini_option;
 pub use config::{LicenseConfig, SecretString};
 pub use gate::LicenseGate;
 pub use http::ReqwestLicenseClient;
