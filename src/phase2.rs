@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+mod batch_plan;
+
+pub use batch_plan::{plan_batch, BatchPlan};
+
 pub const MODEL_FS_HZ: u32 = 500;
 pub const WINDOW_SEC: f32 = 20.0;
 pub const WINDOW_SAMPLES: usize = 10_000;
@@ -193,6 +197,15 @@ impl std::str::FromStr for ExecutionProviderKind {
             )),
         }
     }
+}
+
+/// Batch dimension of the model's `ecg` input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelBatchShape {
+    /// Symbolic / variable batch dimension.
+    Dynamic,
+    /// Batch dimension fixed at export time.
+    Fixed(usize),
 }
 
 /// Phase-2 ONNX session wrapper.
