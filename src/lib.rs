@@ -8,6 +8,7 @@ pub mod dsp;
 #[cfg(feature = "embedded-model")]
 pub mod embedded_model;
 pub mod http;
+pub mod inference_options;
 pub mod license;
 pub mod model_source;
 pub mod phase2;
