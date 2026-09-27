@@ -269,7 +269,9 @@ impl Phase2Model {
                 #[cfg(not(feature = "embedded-model"))]
                 {
                     // `ensure_supported` already rejected Embedded without the feature.
-                    Err(InferError::ModelSource(ModelSourceError::EmbeddedUnavailable))
+                    Err(InferError::ModelSource(
+                        ModelSourceError::EmbeddedUnavailable,
+                    ))
                 }
             }
         }
@@ -287,15 +289,12 @@ impl Phase2Model {
                     match load(*candidate) {
                         Ok(model) => return Ok(model),
                         Err(err) => {
-                            eprintln!(
-                                "provider {candidate} unavailable ({err}); trying next ..."
-                            );
+                            eprintln!("provider {candidate} unavailable ({err}); trying next ...");
                             last_err = Some(err);
                         }
                     }
                 }
-                Err(last_err
-                    .unwrap_or_else(|| InferError::ProviderUnavailable("auto".into())))
+                Err(last_err.unwrap_or_else(|| InferError::ProviderUnavailable("auto".into())))
             }
             other => load(other),
         }
@@ -586,10 +585,8 @@ mod tests {
     #[cfg(not(feature = "embedded-model"))]
     #[test]
     fn load_from_source_embedded_unavailable_without_feature() {
-        let result = Phase2Model::load_from_source(
-            &ModelSource::Embedded,
-            ExecutionProviderKind::Cpu,
-        );
+        let result =
+            Phase2Model::load_from_source(&ModelSource::Embedded, ExecutionProviderKind::Cpu);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("Embedded without feature must fail"),
@@ -671,11 +668,9 @@ mod tests {
     #[cfg(feature = "embedded-model")]
     #[test]
     fn load_from_source_embedded_builds_session() {
-        let mut model = Phase2Model::load_from_source(
-            &ModelSource::Embedded,
-            ExecutionProviderKind::Cpu,
-        )
-        .expect("embedded load_from_source");
+        let mut model =
+            Phase2Model::load_from_source(&ModelSource::Embedded, ExecutionProviderKind::Cpu)
+                .expect("embedded load_from_source");
         assert_eq!(model.provider(), ExecutionProviderKind::Cpu);
         assert_eq!(
             model.model_path().to_string_lossy(),
@@ -708,11 +703,9 @@ mod tests {
             return;
         }
         let samples = smoke_samples();
-        let mut from_emb = Phase2Model::load_from_source(
-            &ModelSource::Embedded,
-            ExecutionProviderKind::Cpu,
-        )
-        .expect("embedded");
+        let mut from_emb =
+            Phase2Model::load_from_source(&ModelSource::Embedded, ExecutionProviderKind::Cpu)
+                .expect("embedded");
         let mut from_path =
             Phase2Model::load_with_provider(onnx, ExecutionProviderKind::Cpu).expect("path");
         let emb_out = from_emb.infer_window(&samples).expect("emb infer");

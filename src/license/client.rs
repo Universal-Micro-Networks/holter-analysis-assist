@@ -102,9 +102,7 @@ mod tests {
             },
         );
 
-        let result = client
-            .authorize_and_meter()
-            .expect("meter should succeed");
+        let result = client.authorize_and_meter().expect("meter should succeed");
         assert!(result.allowed);
         assert_eq!(result.message.as_deref(), Some("metered"));
     }
@@ -134,9 +132,7 @@ mod tests {
             },
         );
 
-        let err = client
-            .authorize_and_meter()
-            .expect_err("deny must be Err");
+        let err = client.authorize_and_meter().expect_err("deny must be Err");
         assert!(
             matches!(&err, LicenseError::InferenceDenied(msg) if msg.contains("quota exceeded")),
             "meter deny must be InferenceDenied: {err:?}"

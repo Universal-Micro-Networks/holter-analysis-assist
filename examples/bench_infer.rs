@@ -14,10 +14,8 @@ fn main() {
     let mut args = env::args().skip(1);
     let onnx = PathBuf::from(args.next().expect("onnx path"));
     let win_dir = PathBuf::from(args.next().expect("window dir"));
-    let requested = ExecutionProviderKind::from_str(
-        &args.next().unwrap_or_else(|| "auto".into()),
-    )
-    .expect("provider");
+    let requested = ExecutionProviderKind::from_str(&args.next().unwrap_or_else(|| "auto".into()))
+        .expect("provider");
     let warmup: usize = args
         .next()
         .unwrap_or_else(|| "3".into())

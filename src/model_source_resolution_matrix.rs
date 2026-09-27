@@ -95,11 +95,9 @@ fn missing_path_rejected() {
 fn embedded_session_builds_without_external_path() {
     use crate::phase2::WINDOW_SAMPLES;
 
-    let mut model = Phase2Model::load_from_source(
-        &ModelSource::Embedded,
-        ExecutionProviderKind::Cpu,
-    )
-    .expect("embedded load_from_source (fixture or injected model)");
+    let mut model =
+        Phase2Model::load_from_source(&ModelSource::Embedded, ExecutionProviderKind::Cpu)
+            .expect("embedded load_from_source (fixture or injected model)");
     assert_eq!(model.provider(), ExecutionProviderKind::Cpu);
     assert_eq!(model.model_path().to_string_lossy(), "<embedded>");
     let samples = {

@@ -43,16 +43,18 @@ impl ReqwestLicenseClient {
     }
 
     fn endpoint(&self, path: &str) -> Result<reqwest::Url, LicenseError> {
-        let base = reqwest::Url::parse(&self.config.server_url).map_err(|e| {
-            LicenseError::Config(format!("invalid license server_url: {e}"))
-        })?;
+        let base = reqwest::Url::parse(&self.config.server_url)
+            .map_err(|e| LicenseError::Config(format!("invalid license server_url: {e}")))?;
         let joined = path.trim_start_matches('/');
         base.join(joined).map_err(|e| {
             LicenseError::Config(format!("invalid license endpoint path '{path}': {e}"))
         })
     }
 
-    fn apply_auth(&self, req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+    fn apply_auth(
+        &self,
+        req: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
         match &self.config.api_key {
             Some(key) => req.header(
                 reqwest::header::AUTHORIZATION,
@@ -227,7 +229,13 @@ mod tests {
         delay: Option<Duration>,
     }
 
-    fn spawn_mock(response: MockResponse) -> (String, Arc<Mutex<Option<CapturedRequest>>>, thread::JoinHandle<()>) {
+    fn spawn_mock(
+        response: MockResponse,
+    ) -> (
+        String,
+        Arc<Mutex<Option<CapturedRequest>>>,
+        thread::JoinHandle<()>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let addr = listener.local_addr().expect("local addr");
         let captured = Arc::new(Mutex::new(None));
@@ -250,9 +258,7 @@ mod tests {
                 }
             };
             stream.set_nonblocking(false).ok();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .ok();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
             let mut buf = Vec::new();
             let mut tmp = [0u8; 1024];
@@ -385,10 +391,7 @@ mod tests {
         let req = captured.lock().unwrap().clone().expect("captured");
         assert_eq!(req.method, "POST");
         assert_eq!(req.path, "/v1/license/check");
-        assert_eq!(
-            req.authorization.as_deref(),
-            Some("Bearer test-secret-key")
-        );
+        assert_eq!(req.authorization.as_deref(), Some("Bearer test-secret-key"));
         let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
         assert_eq!(body, serde_json::json!({}));
     }
@@ -486,7 +489,9 @@ mod tests {
         ))
         .expect("client");
 
-        let result = client.check_validity().expect("provisional allow on non-2xx");
+        let result = client
+            .check_validity()
+            .expect("provisional allow on non-2xx");
         assert!(result.allowed);
         assert!(
             result
@@ -538,7 +543,9 @@ mod tests {
         ))
         .expect("client");
 
-        let result = client.check_validity().expect("provisional allow on timeout");
+        let result = client
+            .check_validity()
+            .expect("provisional allow on timeout");
         assert!(result.allowed);
         assert!(
             result

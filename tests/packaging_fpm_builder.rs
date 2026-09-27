@@ -64,10 +64,7 @@ fn fpm_script_exists_and_builds_both_deb_and_rpm() {
         body.contains("-t rpm") || body.contains("\"rpm\"") || body.contains("'rpm'"),
         "fpm.sh must generate a .rpm (-t rpm); got:\n{body}"
     );
-    assert!(
-        body.contains("fpm"),
-        "fpm.sh must invoke fpm; got:\n{body}"
-    );
+    assert!(body.contains("fpm"), "fpm.sh must invoke fpm; got:\n{body}");
 
     // Package name
     assert!(
@@ -185,7 +182,9 @@ fn fpm_prepare_only_builds_install_root_from_staging() {
 
     let notice_body = read_utf8(&notice);
     assert!(
-        notice_body.contains("ORT") || notice_body.contains("third-party") || !notice_body.is_empty(),
+        notice_body.contains("ORT")
+            || notice_body.contains("third-party")
+            || !notice_body.is_empty(),
         "NOTICE content must be copied into the package root"
     );
     let ini_body = read_utf8(&ini);
@@ -208,7 +207,10 @@ fn fpm_prepare_only_builds_install_root_from_staging() {
             }
         }
     }
-    assert!(!onnx_found, "prepared package root must not contain raw model files");
+    assert!(
+        !onnx_found,
+        "prepared package root must not contain raw model files"
+    );
 }
 
 #[test]

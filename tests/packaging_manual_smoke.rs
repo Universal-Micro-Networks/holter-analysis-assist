@@ -37,7 +37,9 @@ fn manual_smoke_notes_exist_and_list_operator_checkpoints() {
 
     // Embedded HTTP binary premise when available.
     assert!(
-        body.contains("埋め込み") || lower.contains("embedded") || body.contains("release-embedded-http-api"),
+        body.contains("埋め込み")
+            || lower.contains("embedded")
+            || body.contains("release-embedded-http-api"),
         "manual-smoke.md must mention embedded HTTP binary premise; got:\n{body}"
     );
 

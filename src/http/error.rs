@@ -285,7 +285,10 @@ mod tests {
         let bytes = to_bytes(response.into_body(), 1024).await.expect("body");
         let v: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(v["error"]["code"], "payload_too_large");
-        assert!(v["error"]["message"].as_str().unwrap().contains("too large"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too large"));
     }
 
     #[test]

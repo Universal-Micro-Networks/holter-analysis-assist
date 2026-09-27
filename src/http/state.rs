@@ -117,7 +117,10 @@ mod tests {
     #[test]
     fn new_uses_ephemeral_model_source() {
         let path = PathBuf::from("/tmp/custom-model.onnx");
-        let state = AppState::new(minimal_config(Some(path.clone())), ModelSource::Path(path.clone()));
+        let state = AppState::new(
+            minimal_config(Some(path.clone())),
+            ModelSource::Path(path.clone()),
+        );
         assert_eq!(state.model_source, ModelSource::Path(path));
         assert_eq!(state.max_body_bytes(), 1024);
         assert_eq!(state.provider(), ExecutionProviderKind::Cpu);

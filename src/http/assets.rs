@@ -75,14 +75,7 @@ mod tests {
         let js = asset_text("console.js");
         let combined = format!("{html}\n{js}");
 
-        for needle in [
-            "ヘルス",
-            "解析",
-            "ECL",
-            "ダウンロード",
-            "処理中",
-            "選択",
-        ] {
+        for needle in ["ヘルス", "解析", "ECL", "ダウンロード", "処理中", "選択"] {
             assert!(
                 combined.contains(needle),
                 "console must include Japanese UI text containing '{needle}'"

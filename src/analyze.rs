@@ -623,9 +623,7 @@ mod tests {
                 );
                 return;
             }
-            let sample = sample_link
-                .canonicalize()
-                .expect("canonicalize sample.ecl");
+            let sample = sample_link.canonicalize().expect("canonicalize sample.ecl");
             let (_dir, csv) = temp_csv();
             let (rows, summary) = analyze_ecl_with_source(
                 &sample,

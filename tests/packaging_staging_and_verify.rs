@@ -100,7 +100,11 @@ fn prepare_staging_assembles_linux_layout_and_verify_passes() {
         "staging README must state embedded-binary premise; got:\n{readme}"
     );
     assert!(
-        !staging.join("bin").join("holter-http-api").extension().is_some_and(|e| e == "onnx"),
+        !staging
+            .join("bin")
+            .join("holter-http-api")
+            .extension()
+            .is_some_and(|e| e == "onnx"),
         "staging must not place .onnx as the binary"
     );
 
@@ -123,12 +127,7 @@ fn prepare_staging_assembles_windows_layout_with_exe() {
 
     let out = run_bash(
         &prepare,
-        &[
-            "--os",
-            "windows",
-            "--binary",
-            binary.to_str().unwrap(),
-        ],
+        &["--os", "windows", "--binary", binary.to_str().unwrap()],
     );
     assert!(
         out.status.success(),
@@ -186,10 +185,7 @@ fn verify_fails_when_sample_ini_missing() {
     // http.ini.example intentionally omitted
 
     let out = run_bash(&verify, &[staging.path().to_str().unwrap()]);
-    assert!(
-        !out.status.success(),
-        "verify must fail without sample ini"
-    );
+    assert!(!out.status.success(), "verify must fail without sample ini");
     let err = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stderr),
@@ -218,10 +214,7 @@ fn verify_fails_when_binary_missing() {
     // bin/holter-http-api intentionally omitted
 
     let out = run_bash(&verify, &[staging.path().to_str().unwrap()]);
-    assert!(
-        !out.status.success(),
-        "verify must fail without binary"
-    );
+    assert!(!out.status.success(), "verify must fail without binary");
     let err = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stderr),

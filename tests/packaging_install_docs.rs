@@ -141,8 +141,7 @@ fn install_docs_linux_packages_exists_and_covers_operator_topics() {
         "linux-packages.md must cover both deb and rpm; got:\n{body}"
     );
     assert!(
-        body.contains("/usr/bin/holter-http-api")
-            || body.contains("/usr/share/holter-http-api"),
+        body.contains("/usr/bin/holter-http-api") || body.contains("/usr/share/holter-http-api"),
         "linux-packages.md must document package install paths; got:\n{body}"
     );
 }

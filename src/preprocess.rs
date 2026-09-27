@@ -300,15 +300,16 @@ mod tests {
             study_date: study,
             recording_start: study.and_hms_opt(14, 15, 0).unwrap(),
             // Intentionally longer than 7 days (filename-style end far in the future).
-            recording_end: (study + Duration::days(10))
-                .and_hms_opt(14, 15, 0)
-                .unwrap(),
+            recording_end: (study + Duration::days(10)).and_hms_opt(14, 15, 0).unwrap(),
             start_time_hhmm: "1415".into(),
             end_time_hhmm: "1415".into(),
         };
         let n_samples = MAX_RECORDING_SAMPLES_250 + EXPECTED_24H_SAMPLES_250;
         let (start, end) = valid_range_250(&info, n_samples).unwrap();
-        assert_eq!(start, 14 * 3600 * ORIG_FS as usize + 15 * 60 * ORIG_FS as usize);
+        assert_eq!(
+            start,
+            14 * 3600 * ORIG_FS as usize + 15 * 60 * ORIG_FS as usize
+        );
         assert_eq!(end - start, MAX_RECORDING_SAMPLES_250);
         let excl = recording_end_exclusive_capped(&info);
         assert_eq!(

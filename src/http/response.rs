@@ -69,15 +69,11 @@ impl ResponseCodec {
         let bytes = wtr
             .into_inner()
             .map_err(|e| HttpError::internal(format!("csv buffer failed: {e}")))?;
-        String::from_utf8(bytes)
-            .map_err(|e| HttpError::internal(format!("csv utf-8 failed: {e}")))
+        String::from_utf8(bytes).map_err(|e| HttpError::internal(format!("csv utf-8 failed: {e}")))
     }
 
     /// Machine-readable JSON with `summary` and `rows` (CLI-equivalent labels).
-    pub fn to_json(
-        rows: &[BeatResultRow],
-        summary: &AnalyzeSummary,
-    ) -> Result<String, HttpError> {
+    pub fn to_json(rows: &[BeatResultRow], summary: &AnalyzeSummary) -> Result<String, HttpError> {
         let body = AnalyzeJsonBody {
             summary: AnalyzeSummaryJson::from(summary),
             rows,

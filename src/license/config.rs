@@ -70,7 +70,10 @@ impl LicenseConfig {
     /// timeout yield [`LicenseError::Config`].
     pub fn load_from_path(path: &Path) -> Result<Self, LicenseError> {
         let ini = ini::Ini::load_from_file(path).map_err(|e| {
-            LicenseError::Config(format!("failed to read license ini {}: {e}", path.display()))
+            LicenseError::Config(format!(
+                "failed to read license ini {}: {e}",
+                path.display()
+            ))
         })?;
 
         let section = ini.section(Some(SECTION)).ok_or_else(|| {
@@ -78,7 +81,9 @@ impl LicenseConfig {
         })?;
 
         let server_url_raw = section.get(KEY_SERVER_URL).ok_or_else(|| {
-            LicenseError::Config(format!("missing required key '{KEY_SERVER_URL}' in [{SECTION}]"))
+            LicenseError::Config(format!(
+                "missing required key '{KEY_SERVER_URL}' in [{SECTION}]"
+            ))
         })?;
         let server_url = validate_server_url(server_url_raw)?;
 
@@ -92,8 +97,16 @@ impl LicenseConfig {
             None => Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         };
 
-        let check_path = optional_path(section.get(KEY_CHECK_PATH), DEFAULT_CHECK_PATH, KEY_CHECK_PATH)?;
-        let meter_path = optional_path(section.get(KEY_METER_PATH), DEFAULT_METER_PATH, KEY_METER_PATH)?;
+        let check_path = optional_path(
+            section.get(KEY_CHECK_PATH),
+            DEFAULT_CHECK_PATH,
+            KEY_CHECK_PATH,
+        )?;
+        let meter_path = optional_path(
+            section.get(KEY_METER_PATH),
+            DEFAULT_METER_PATH,
+            KEY_METER_PATH,
+        )?;
 
         Ok(Self {
             server_url,
@@ -117,9 +130,8 @@ fn validate_server_url(raw: &str) -> Result<String, LicenseError> {
         )));
     }
 
-    let url = reqwest::Url::parse(trimmed).map_err(|e| {
-        config_err(format!("invalid '{KEY_SERVER_URL}': not a valid URL ({e})"))
-    })?;
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|e| config_err(format!("invalid '{KEY_SERVER_URL}': not a valid URL ({e})")))?;
 
     match url.scheme() {
         "https" | "http" => {}
@@ -154,11 +166,7 @@ fn parse_timeout_secs(raw: &str) -> Result<Duration, LicenseError> {
     Ok(Duration::from_secs(secs))
 }
 
-fn optional_path(
-    raw: Option<&str>,
-    default: &str,
-    key: &str,
-) -> Result<String, LicenseError> {
+fn optional_path(raw: Option<&str>, default: &str, key: &str) -> Result<String, LicenseError> {
     match raw {
         None => Ok(default.to_string()),
         Some(v) => {
@@ -368,21 +376,31 @@ timeout_secs=abc
 
     #[test]
     fn example_ini_is_canonical_license_section_with_permission_notes() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/license.ini.example");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/license.ini.example");
         let body = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("canonical sample missing at {}: {e}", path.display()));
         assert!(
             body.contains("[license]"),
             "example must define [license] section"
         );
-        assert!(body.contains("server_url"), "example must document server_url");
+        assert!(
+            body.contains("server_url"),
+            "example must document server_url"
+        );
         assert!(body.contains("api_key"), "example must document api_key");
         assert!(
             body.contains("timeout_secs"),
             "example must document timeout_secs"
         );
-        assert!(body.contains("check_path"), "example must document check_path");
-        assert!(body.contains("meter_path"), "example must document meter_path");
+        assert!(
+            body.contains("check_path"),
+            "example must document check_path"
+        );
+        assert!(
+            body.contains("meter_path"),
+            "example must document meter_path"
+        );
         let lower = body.to_lowercase();
         assert!(
             lower.contains("permission")

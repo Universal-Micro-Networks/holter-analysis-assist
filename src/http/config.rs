@@ -49,23 +49,15 @@ impl HttpConfig {
     /// upstream [`crate::license::LicenseConfig`] using the same key names.
     pub fn load_from_path(path: &Path) -> Result<Self, HttpConfigError> {
         let ini = ini::Ini::load_from_file(path).map_err(|e| {
-            HttpConfigError::Config(format!(
-                "failed to read http ini {}: {e}",
-                path.display()
-            ))
+            HttpConfigError::Config(format!("failed to read http ini {}: {e}", path.display()))
         })?;
 
         let section = ini.section(Some(SECTION)).ok_or_else(|| {
-            HttpConfigError::Config(format!(
-                "missing [{SECTION}] section in {}",
-                path.display()
-            ))
+            HttpConfigError::Config(format!("missing [{SECTION}] section in {}", path.display()))
         })?;
 
         let bind_raw = section.get(KEY_BIND).ok_or_else(|| {
-            HttpConfigError::Config(format!(
-                "missing required key '{KEY_BIND}' in [{SECTION}]"
-            ))
+            HttpConfigError::Config(format!("missing required key '{KEY_BIND}' in [{SECTION}]"))
         })?;
         let bind = validate_bind(bind_raw)?;
 
@@ -100,9 +92,8 @@ impl HttpConfig {
                         "invalid '{KEY_PROVIDER}': value must not be empty when set"
                     )));
                 }
-                ExecutionProviderKind::from_str(trimmed).map_err(|e| {
-                    config_err(format!("invalid '{KEY_PROVIDER}': {e}"))
-                })?
+                ExecutionProviderKind::from_str(trimmed)
+                    .map_err(|e| config_err(format!("invalid '{KEY_PROVIDER}': {e}")))?
             }
             None => ExecutionProviderKind::Auto,
         };
@@ -379,8 +370,7 @@ server_url=https://license.example.com
 
     #[test]
     fn example_ini_documents_http_keys_tls_and_license_canonical() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/http.ini.example");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/http.ini.example");
         let body = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("canonical sample missing at {}: {e}", path.display()));
         assert!(
@@ -394,10 +384,7 @@ server_url=https://license.example.com
             "model_path",
             "provider",
         ] {
-            assert!(
-                body.contains(key),
-                "example must document key '{key}'"
-            );
+            assert!(body.contains(key), "example must document key '{key}'");
         }
         let lower = body.to_lowercase();
         assert!(

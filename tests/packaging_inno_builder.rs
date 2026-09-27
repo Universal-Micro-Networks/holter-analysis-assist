@@ -81,7 +81,9 @@ fn iss_places_exe_sample_ini_notice_and_short_docs() {
 
     // Active file sources must not pull raw model weights (Req 4.1).
     assert!(
-        !lower.contains(".onnx") && !lower.contains("resources\\models") && !lower.contains("resources/models"),
+        !lower.contains(".onnx")
+            && !lower.contains("resources\\models")
+            && !lower.contains("resources/models"),
         "active iss instructions must not reference .onnx or resources/models; got:\n{active}"
     );
 }
@@ -133,8 +135,7 @@ fn optional_build_script_fails_non_zero_when_iscc_missing_or_fails() {
         "build-inno.sh must use set -e (fail closed); got:\n{script_body}"
     );
     assert!(
-        script_body.to_ascii_lowercase().contains("iscc")
-            || script_body.contains("Inno Setup"),
+        script_body.to_ascii_lowercase().contains("iscc") || script_body.contains("Inno Setup"),
         "build-inno.sh must invoke ISCC / Inno Setup; got:\n{script_body}"
     );
     assert!(

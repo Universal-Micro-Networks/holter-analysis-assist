@@ -117,12 +117,7 @@ mod tests {
 
     async fn oneshot_get(app: &axum::Router, uri: &str) -> axum::response::Response {
         app.clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .expect("oneshot")
     }
@@ -202,7 +197,9 @@ mod tests {
 
                 let health = oneshot_get(&app, "/health").await;
                 assert_eq!(health.status(), StatusCode::OK);
-                let health_bytes = to_bytes(health.into_body(), 1024).await.expect("health body");
+                let health_bytes = to_bytes(health.into_body(), 1024)
+                    .await
+                    .expect("health body");
                 let health_json: Value =
                     serde_json::from_slice(&health_bytes).expect("health json");
                 assert_eq!(health_json["status"], "ok");
@@ -277,7 +274,9 @@ mod tests {
                 // Health regression + no meter
                 let health = oneshot_get(&app, "/health").await;
                 assert_eq!(health.status(), StatusCode::OK, "/health regression");
-                let health_bytes = to_bytes(health.into_body(), 1024).await.expect("health body");
+                let health_bytes = to_bytes(health.into_body(), 1024)
+                    .await
+                    .expect("health body");
                 let health_json: Value =
                     serde_json::from_slice(&health_bytes).expect("health json");
                 assert_eq!(health_json["status"], "ok");

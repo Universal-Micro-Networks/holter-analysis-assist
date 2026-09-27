@@ -141,7 +141,11 @@ fn build_docker_script_wires_dockerignore_into_staging_context() {
     let root = repo_root();
     let script = root.join("packaging/scripts/build-docker.sh");
     let canonical = root.join("packaging/docker/.dockerignore");
-    assert!(script.is_file(), "missing build helper: {}", script.display());
+    assert!(
+        script.is_file(),
+        "missing build helper: {}",
+        script.display()
+    );
     assert!(
         canonical.is_file(),
         "missing canonical .dockerignore: {}",
@@ -169,7 +173,11 @@ fn build_docker_script_wires_dockerignore_into_staging_context() {
     fs::create_dir_all(staging.path().join("bin")).unwrap();
     fs::write(staging.path().join("bin/holter-http-api"), b"mock").unwrap();
     fs::write(staging.path().join("NOTICE"), "notice\n").unwrap();
-    fs::write(staging.path().join("http.ini.example"), "[http]\nbind=0.0.0.0:8080\n").unwrap();
+    fs::write(
+        staging.path().join("http.ini.example"),
+        "[http]\nbind=0.0.0.0:8080\n",
+    )
+    .unwrap();
 
     let out = run_bash(
         &script,

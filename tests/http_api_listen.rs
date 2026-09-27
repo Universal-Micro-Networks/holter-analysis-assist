@@ -190,9 +190,7 @@ fn http_exchange_timeout(
     let mut stream = TcpStream::connect(addr).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
-    stream
-        .write_all(request)
-        .map_err(|e| e.to_string())?;
+    stream.write_all(request).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&buf);
@@ -355,11 +353,7 @@ fn startup_license_denied_exits_nonzero_and_does_not_listen() {
         mock.check_hits() >= 1,
         "startup must have called license check"
     );
-    assert_eq!(
-        mock.meter_hits(),
-        0,
-        "startup path must not meter"
-    );
+    assert_eq!(mock.meter_hits(), 0, "startup path must not meter");
 }
 
 #[test]
@@ -435,7 +429,8 @@ fn analyze_invalid_input_returns_400_without_meter() {
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
     assert_eq!(
-        status, 400,
+        status,
+        400,
         "invalid ecl filename must be client error: body={}",
         String::from_utf8_lossy(&body)
     );
@@ -461,7 +456,8 @@ fn analyze_meter_deny_returns_403_without_result_leak() {
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
     assert_eq!(
-        status, 403,
+        status,
+        403,
         "meter deny must map to inference rejection: body={}",
         String::from_utf8_lossy(&body)
     );
@@ -503,7 +499,8 @@ fn analyze_oversized_body_returns_413_without_meter() {
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
     assert_eq!(
-        status, 413,
+        status,
+        413,
         "oversized body must be rejected before analyze: body={}",
         String::from_utf8_lossy(&body)
     );
@@ -565,7 +562,8 @@ fn analyze_success_returns_csv_and_meters_once_when_sample_present() {
     let (status, body) =
         http_exchange_timeout(&bind, &req, Duration::from_secs(180)).expect("analyze exchange");
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "analyze success expected; body={}",
         String::from_utf8_lossy(&body[..body.len().min(500)])
     );

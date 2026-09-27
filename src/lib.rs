@@ -5,10 +5,10 @@
 
 pub mod analyze;
 pub mod dsp;
-pub mod http;
-pub mod license;
 #[cfg(feature = "embedded-model")]
 pub mod embedded_model;
+pub mod http;
+pub mod license;
 pub mod model_source;
 pub mod phase2;
 pub mod postprocess;

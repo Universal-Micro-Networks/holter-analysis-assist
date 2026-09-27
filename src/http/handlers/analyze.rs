@@ -61,7 +61,14 @@ impl AnalyzeHandler {
         let out_csv = out_dir.path().join("beat_results.csv");
 
         let analyze_result = tokio::task::spawn_blocking(move || {
-            run_analyze(&shared, &model_source, provider, &ecl_path, &out_csv, max_windows)
+            run_analyze(
+                &shared,
+                &model_source,
+                provider,
+                &ecl_path,
+                &out_csv,
+                max_windows,
+            )
         })
         .await
         .map_err(|e| HttpError::internal(format!("analyze task join failed: {e}")))?;
@@ -117,12 +124,18 @@ fn run_analyze(
     ecl_path: &Path,
     out_csv: &Path,
     max_windows: Option<usize>,
-) -> Result<(Vec<crate::analyze::BeatResultRow>, crate::analyze::AnalyzeSummary), AnalyzeError> {
+) -> Result<
+    (
+        Vec<crate::analyze::BeatResultRow>,
+        crate::analyze::AnalyzeSummary,
+    ),
+    AnalyzeError,
+> {
     match shared {
         SharedModel::Resident(model) => {
-            let mut guard = model.lock().map_err(|_| {
-                AnalyzeError::Post("resident model lock poisoned".into())
-            })?;
+            let mut guard = model
+                .lock()
+                .map_err(|_| AnalyzeError::Post("resident model lock poisoned".into()))?;
             // Per-request provider override only when it disagrees with the loaded EP.
             // `Auto` always reuses the resident session (already resolved at startup).
             let need_reload = match provider {
@@ -246,8 +259,8 @@ async fn parse_multipart(
         None => None,
     };
 
-    let ecl_dir = TempDir::new()
-        .map_err(|e| HttpError::internal(format!("temp ecl dir failed: {e}")))?;
+    let ecl_dir =
+        TempDir::new().map_err(|e| HttpError::internal(format!("temp ecl dir failed: {e}")))?;
     let ecl_path = ecl_dir.path().join(safe_basename(&filename));
     std::fs::write(&ecl_path, &data)
         .map_err(|e| HttpError::internal(format!("failed to write temp ecl: {e}")))?;
@@ -489,7 +502,10 @@ mod tests {
         with_gate(MockOutcome::Success { message: None }, |meter_calls| {
             block_on(async {
                 let state = AppState::new(
-                    test_config(1024 * 1024, Some(PathBuf::from("/tmp/missing-http-3-1.onnx"))),
+                    test_config(
+                        1024 * 1024,
+                        Some(PathBuf::from("/tmp/missing-http-3-1.onnx")),
+                    ),
                     ModelSource::Path(PathBuf::from("/tmp/missing-http-3-1.onnx")),
                 );
                 let app = app_with_state(state);
@@ -512,7 +528,10 @@ mod tests {
         with_gate(MockOutcome::Success { message: None }, |meter_calls| {
             block_on(async {
                 let state = AppState::new(
-                    test_config(1024 * 1024, Some(PathBuf::from("/tmp/missing-http-3-1.onnx"))),
+                    test_config(
+                        1024 * 1024,
+                        Some(PathBuf::from("/tmp/missing-http-3-1.onnx")),
+                    ),
                     ModelSource::Path(PathBuf::from("/tmp/missing-http-3-1.onnx")),
                 );
                 let app = app_with_state(state);
