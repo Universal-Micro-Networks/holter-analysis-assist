@@ -5,6 +5,7 @@
 //! - input `ecg`: `(B, 10000, 1)` float32 NTC
 //! - outputs: `beat`, `event` `[PAC,PVC,N]`, `rhythm` (AF/AFL vs SR)
 
+use crate::inference_options::{BatchSize, CudaTuning};
 use crate::model_source::{ModelSource, ModelSourceError};
 use ndarray::Array3;
 use ort::session::builder::SessionBuilder;
@@ -208,12 +209,48 @@ pub enum ModelBatchShape {
     Fixed(usize),
 }
 
+/// Requested inference settings: execution provider, batch size, CUDA tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InferenceOptions {
+    pub provider: ExecutionProviderKind,
+    pub batch_size: BatchSize,
+    pub cuda: CudaTuning,
+}
+
+impl From<ExecutionProviderKind> for InferenceOptions {
+    fn from(provider: ExecutionProviderKind) -> Self {
+        Self {
+            provider,
+            ..Self::default()
+        }
+    }
+}
+
+/// Settings in effect after the session is built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveInference {
+    /// Resolved provider (never `Auto`).
+    pub provider: ExecutionProviderKind,
+    /// Windows per inference call.
+    pub batch_size: usize,
+    pub requested_batch_size: usize,
+    pub model_batch: ModelBatchShape,
+    /// Short final batches are padded up to `batch_size`.
+    pub pad_tail: bool,
+    /// Requested CUDA tuning.
+    pub cuda: CudaTuning,
+    /// True only when the provider is CUDA, i.e. `cuda` was passed to the CUDA EP.
+    pub cuda_applied: bool,
+    pub cuda_graph_active: bool,
+    /// Warnings (fixed-batch clamp, tuning not applied, ...).
+    pub notes: Vec<String>,
+}
+
 /// Phase-2 ONNX session wrapper.
 pub struct Phase2Model {
     session: Session,
     model_path: PathBuf,
-    /// Provider that was actually used to build the session (never `Auto`).
-    provider: ExecutionProviderKind,
+    effective: EffectiveInference,
 }
 
 impl Phase2Model {
@@ -224,6 +261,13 @@ impl Phase2Model {
     pub fn load_with_provider(
         path: impl AsRef<Path>,
         provider: ExecutionProviderKind,
+    ) -> Result<Self, InferError> {
+        Self::load_with_options(path, &InferenceOptions::from(provider))
+    }
+
+    pub fn load_with_options(
+        path: impl AsRef<Path>,
+        options: &InferenceOptions,
     ) -> Result<Self, InferError> {
         // `cargo run --example` places the exe under `target/*/examples/`, while
         // ort's copy-dylibs drops EP DLLs in `target/*/`. Ensure that parent dir
@@ -236,8 +280,8 @@ impl Phase2Model {
         }
 
         let path_buf = path.to_path_buf();
-        Self::resolve_provider(provider, |resolved| {
-            Self::commit_from_file_resolved(&path_buf, resolved)
+        Self::resolve_provider(options.provider, |resolved| {
+            Self::commit_from_file_resolved(&path_buf, resolved, options)
         })
     }
 
@@ -246,12 +290,24 @@ impl Phase2Model {
         model_bytes: &[u8],
         provider: ExecutionProviderKind,
     ) -> Result<Self, InferError> {
+        Self::load_from_memory_with(
+            model_bytes,
+            &InferenceOptions::from(provider),
+            PathBuf::from("<memory>"),
+        )
+    }
+
+    fn load_from_memory_with(
+        model_bytes: &[u8],
+        options: &InferenceOptions,
+        model_path: PathBuf,
+    ) -> Result<Self, InferError> {
         ensure_ort_dylib_search_path();
         if model_bytes.is_empty() {
             return Err(InferError::EmptyModelBytes);
         }
-        Self::resolve_provider(provider, |resolved| {
-            Self::commit_from_memory_resolved(model_bytes, resolved, PathBuf::from("<memory>"))
+        Self::resolve_provider(options.provider, |resolved| {
+            Self::commit_from_memory_resolved(model_bytes, resolved, options, model_path.clone())
         })
     }
 
@@ -260,24 +316,25 @@ impl Phase2Model {
         source: &ModelSource,
         provider: ExecutionProviderKind,
     ) -> Result<Self, InferError> {
+        Self::load_from_source_with(source, &InferenceOptions::from(provider))
+    }
+
+    /// [`Self::load_from_source`] with batch size and CUDA tuning.
+    pub fn load_from_source_with(
+        source: &ModelSource,
+        options: &InferenceOptions,
+    ) -> Result<Self, InferError> {
         source.ensure_supported()?;
         match source {
-            ModelSource::Path(path) => Self::load_with_provider(path, provider),
+            ModelSource::Path(path) => Self::load_with_options(path, options),
             ModelSource::Embedded => {
                 #[cfg(feature = "embedded-model")]
                 {
-                    let bytes = crate::embedded_model::embedded_model_bytes();
-                    if bytes.is_empty() {
-                        return Err(InferError::EmptyModelBytes);
-                    }
-                    ensure_ort_dylib_search_path();
-                    Self::resolve_provider(provider, |resolved| {
-                        Self::commit_from_memory_resolved(
-                            bytes,
-                            resolved,
-                            PathBuf::from("<embedded>"),
-                        )
-                    })
+                    Self::load_from_memory_with(
+                        crate::embedded_model::embedded_model_bytes(),
+                        options,
+                        PathBuf::from("<embedded>"),
+                    )
                 }
                 #[cfg(not(feature = "embedded-model"))]
                 {
@@ -313,66 +370,102 @@ impl Phase2Model {
         }
     }
 
+    /// CUDA sessions receive the specified tuning values; device 0, FP32 only.
     fn session_builder_for_provider(
         provider: ExecutionProviderKind,
+        tuning: &CudaTuning,
     ) -> Result<SessionBuilder, InferError> {
         debug_assert_ne!(provider, ExecutionProviderKind::Auto);
 
-        let mut builder = Session::builder()?
+        let builder = Session::builder()?
             .with_no_environment_execution_providers()
             .map_err(ort::Error::<()>::from)?;
 
         match provider {
             ExecutionProviderKind::Auto => unreachable!("resolved providers only"),
-            ExecutionProviderKind::Cpu => {
-                // Explicit CPU-only session (no env EPs).
-            }
+            // Explicit CPU-only session (no env EPs).
+            ExecutionProviderKind::Cpu => Ok(builder),
             ExecutionProviderKind::Cuda => {
                 #[cfg(feature = "cuda")]
                 {
-                    use ort::ep;
-
                     // Fail hard so `auto` / explicit `cuda` do not silently run on CPU.
-                    let cuda = ep::CUDA::default().build().error_on_failure();
-                    builder = builder
+                    let cuda = apply_cuda_tuning(ort::ep::CUDA::default(), tuning)
+                        .build()
+                        .error_on_failure();
+                    Ok(builder
                         .with_execution_providers([cuda])
-                        .map_err(ort::Error::<()>::from)?;
+                        .map_err(ort::Error::<()>::from)?)
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
-                    return Err(InferError::ProviderUnavailable(
+                    let _ = (builder, tuning);
+                    Err(InferError::ProviderUnavailable(
                         "cuda (build with --features cuda)".into(),
-                    ));
+                    ))
                 }
             }
         }
-        Ok(builder)
     }
 
     fn commit_from_file_resolved(
         path: &Path,
         provider: ExecutionProviderKind,
+        options: &InferenceOptions,
     ) -> Result<Self, InferError> {
-        let mut builder = Self::session_builder_for_provider(provider)?;
+        let mut builder = Self::session_builder_for_provider(provider, &options.cuda)?;
         let session = builder.commit_from_file(path)?;
-        Ok(Self {
-            session,
-            model_path: path.to_path_buf(),
-            provider,
-        })
+        Self::with_effective(session, path.to_path_buf(), provider, options)
     }
 
     fn commit_from_memory_resolved(
         model_bytes: &[u8],
         provider: ExecutionProviderKind,
+        options: &InferenceOptions,
         model_path: PathBuf,
     ) -> Result<Self, InferError> {
-        let mut builder = Self::session_builder_for_provider(provider)?;
+        let mut builder = Self::session_builder_for_provider(provider, &options.cuda)?;
         let session = builder.commit_from_memory(model_bytes)?;
+        Self::with_effective(session, model_path, provider, options)
+    }
+
+    /// Derive the effective settings from the built session and print its warnings.
+    fn with_effective(
+        session: Session,
+        model_path: PathBuf,
+        provider: ExecutionProviderKind,
+        options: &InferenceOptions,
+    ) -> Result<Self, InferError> {
+        let model_batch = model_batch_shape(&session)?;
+        let is_cuda = provider == ExecutionProviderKind::Cuda;
+        let cuda_graph_active = is_cuda && options.cuda.wants_cuda_graph();
+        let plan = plan_batch(model_batch, options.batch_size, cuda_graph_active);
+
+        let mut notes = Vec::new();
+        if !is_cuda && !options.cuda.is_unset() {
+            notes.push(format!(
+                "CUDA tuning ({}) not applied: execution provider is {provider}",
+                options.cuda.specified_keys().join(", ")
+            ));
+        }
+        notes.extend(plan.note);
+        for note in &notes {
+            eprintln!("warning: {note}");
+        }
+
         Ok(Self {
             session,
             model_path,
-            provider,
+            effective: EffectiveInference {
+                provider,
+                batch_size: plan.size,
+                requested_batch_size: options.batch_size.get(),
+                model_batch,
+                pad_tail: plan.pad_tail,
+                cuda: options.cuda,
+                cuda_applied: is_cuda,
+                cuda_graph_active,
+                notes,
+            },
         })
     }
 
@@ -381,7 +474,16 @@ impl Phase2Model {
     }
 
     pub fn provider(&self) -> ExecutionProviderKind {
-        self.provider
+        self.effective.provider
+    }
+
+    pub fn effective(&self) -> &EffectiveInference {
+        &self.effective
+    }
+
+    /// Effective windows per inference call.
+    pub fn batch_size(&self) -> usize {
+        self.effective.batch_size
     }
 
     /// Run inference on one preprocessed window (`WINDOW_SAMPLES` float32 samples).
@@ -414,6 +516,49 @@ impl Phase2Model {
             event,
             rhythm,
         })
+    }
+}
+
+/// Pass only the specified tuning values; `None` keeps the ONNX Runtime default.
+#[cfg(feature = "cuda")]
+fn apply_cuda_tuning(mut cuda: ort::ep::CUDA, tuning: &CudaTuning) -> ort::ep::CUDA {
+    if let Some(enable) = tuning.tf32 {
+        cuda = cuda.with_tf32(enable);
+    }
+    if let Some(enable) = tuning.conv1d_pad_to_nc1d {
+        cuda = cuda.with_conv1d_pad_to_nc1d(enable);
+    }
+    if let Some(enable) = tuning.cuda_graph {
+        cuda = cuda.with_cuda_graph(enable);
+    }
+    cuda
+}
+
+/// Batch dimension of the `ecg` input (first input if unnamed); symbolic dims are negative.
+fn model_batch_shape(session: &Session) -> Result<ModelBatchShape, InferError> {
+    let inputs = session.inputs();
+    let input = inputs
+        .iter()
+        .find(|i| i.name() == INPUT_NAME)
+        .or_else(|| inputs.first())
+        .ok_or_else(|| InferError::BadShape {
+            name: INPUT_NAME,
+            detail: "model has no inputs".into(),
+        })?;
+    let dims = input
+        .dtype()
+        .tensor_shape()
+        .ok_or_else(|| InferError::BadShape {
+            name: INPUT_NAME,
+            detail: format!("input is not a tensor: {:?}", input.dtype()),
+        })?;
+    match dims.first() {
+        Some(&n) if n > 0 => Ok(ModelBatchShape::Fixed(n as usize)),
+        Some(_) => Ok(ModelBatchShape::Dynamic),
+        None => Err(InferError::BadShape {
+            name: INPUT_NAME,
+            detail: "input has no batch dimension".into(),
+        }),
     }
 }
 
@@ -522,6 +667,7 @@ pub fn zscore_window_eps(samples: &mut [f32], eps: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference_options::DEFAULT_BATCH_SIZE;
     use crate::model_source::ModelSource;
 
     fn smoke_samples() -> Vec<f32> {
@@ -728,6 +874,257 @@ mod tests {
         assert_eq!(emb_out.event, path_out.event);
         assert_eq!(emb_out.summary_beat_class(), path_out.summary_beat_class());
         assert_eq!(emb_out.rhythm_class(), path_out.rhythm_class());
+    }
+
+    fn tiny_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    fn cpu_options(batch: usize, cuda: CudaTuning) -> InferenceOptions {
+        InferenceOptions {
+            provider: ExecutionProviderKind::Cpu,
+            batch_size: BatchSize::new(batch).unwrap(),
+            cuda,
+        }
+    }
+
+    #[test]
+    fn inference_options_from_provider_uses_defaults() {
+        let opts = InferenceOptions::from(ExecutionProviderKind::Cuda);
+        assert_eq!(opts.provider, ExecutionProviderKind::Cuda);
+        assert_eq!(opts.batch_size, BatchSize::default());
+        assert!(opts.cuda.is_unset());
+        assert_eq!(
+            InferenceOptions::default(),
+            InferenceOptions::from(ExecutionProviderKind::Auto)
+        );
+    }
+
+    #[test]
+    fn fixed1_fixture_clamps_requested_batch_with_warning() {
+        let opts = cpu_options(16, CudaTuning::default());
+        let model = Phase2Model::load_with_options(tiny_fixture("phase2_tiny_fixed1.onnx"), &opts)
+            .expect("load fixed1");
+        let eff = model.effective();
+        assert_eq!(eff.provider, ExecutionProviderKind::Cpu);
+        assert_eq!(eff.model_batch, ModelBatchShape::Fixed(1));
+        assert_eq!(eff.batch_size, 1);
+        assert_eq!(eff.requested_batch_size, 16);
+        assert!(!eff.pad_tail);
+        assert!(!eff.cuda_applied);
+        assert!(!eff.cuda_graph_active);
+        assert_eq!(model.batch_size(), 1);
+        assert_eq!(eff.notes.len(), 1, "{:?}", eff.notes);
+        assert!(eff.notes[0].contains("fixed batch 1"), "{:?}", eff.notes);
+        assert!(eff.notes[0].contains("batch_size=16"), "{:?}", eff.notes);
+    }
+
+    #[test]
+    fn fixed1_fixture_with_matching_request_has_no_notes() {
+        let opts = cpu_options(1, CudaTuning::default());
+        let model = Phase2Model::load_with_options(tiny_fixture("phase2_tiny_fixed1.onnx"), &opts)
+            .expect("load fixed1");
+        assert_eq!(model.batch_size(), 1);
+        assert!(model.effective().notes.is_empty());
+    }
+
+    #[test]
+    fn dynamic_fixture_uses_requested_batch() {
+        let opts = cpu_options(16, CudaTuning::default());
+        let model = Phase2Model::load_with_options(tiny_fixture("phase2_tiny_dynamic.onnx"), &opts)
+            .expect("load dynamic");
+        let eff = model.effective();
+        assert_eq!(
+            eff,
+            &EffectiveInference {
+                provider: ExecutionProviderKind::Cpu,
+                batch_size: 16,
+                requested_batch_size: 16,
+                model_batch: ModelBatchShape::Dynamic,
+                pad_tail: false,
+                cuda: CudaTuning::default(),
+                cuda_applied: false,
+                cuda_graph_active: false,
+                notes: Vec::new(),
+            }
+        );
+        assert_eq!(model.batch_size(), 16);
+    }
+
+    #[test]
+    fn cuda_tuning_on_cpu_is_not_applied_and_warned() {
+        let tuning = CudaTuning {
+            tf32: Some(false),
+            conv1d_pad_to_nc1d: Some(true),
+            cuda_graph: Some(true),
+        };
+        let opts = cpu_options(8, tuning);
+        let mut model =
+            Phase2Model::load_with_options(tiny_fixture("phase2_tiny_dynamic.onnx"), &opts)
+                .expect("load dynamic with tuning on cpu");
+        let eff = model.effective().clone();
+        assert_eq!(eff.provider, ExecutionProviderKind::Cpu);
+        assert_eq!(eff.cuda, tuning, "requested tuning is recorded");
+        assert!(!eff.cuda_applied);
+        assert!(!eff.cuda_graph_active, "cuda graph needs the CUDA provider");
+        assert!(!eff.pad_tail, "no fixed shape without an active cuda graph");
+        assert_eq!(eff.batch_size, 8);
+        assert_eq!(eff.notes.len(), 1, "{:?}", eff.notes);
+        let note = &eff.notes[0];
+        assert!(note.contains("not applied"), "{note}");
+        assert!(note.contains("cpu"), "{note}");
+        for key in ["cuda_tf32", "cuda_conv1d_pad_to_nc1d", "cuda_graph"] {
+            assert!(note.contains(key), "{note} should name {key}");
+        }
+        let out = model
+            .infer_window(&smoke_samples())
+            .expect("inference continues on cpu");
+        assert_eq!(out.beat.len(), WINDOW_SAMPLES);
+    }
+
+    #[test]
+    fn partial_cuda_tuning_warning_names_only_specified_keys() {
+        let tuning = CudaTuning {
+            tf32: None,
+            conv1d_pad_to_nc1d: Some(false),
+            cuda_graph: None,
+        };
+        let model = Phase2Model::load_with_options(
+            tiny_fixture("phase2_tiny_dynamic.onnx"),
+            &cpu_options(16, tuning),
+        )
+        .expect("load");
+        let notes = &model.effective().notes;
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("cuda_conv1d_pad_to_nc1d"), "{notes:?}");
+        assert!(!notes[0].contains("cuda_tf32"), "{notes:?}");
+        assert!(!notes[0].contains("cuda_graph"), "{notes:?}");
+    }
+
+    #[test]
+    fn fixed1_with_tuning_on_cpu_collects_both_warnings() {
+        let tuning = CudaTuning {
+            tf32: Some(true),
+            ..CudaTuning::default()
+        };
+        let model = Phase2Model::load_with_options(
+            tiny_fixture("phase2_tiny_fixed1.onnx"),
+            &cpu_options(16, tuning),
+        )
+        .expect("load");
+        let notes = &model.effective().notes;
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("not applied")), "{notes:?}");
+        assert!(
+            notes.iter().any(|n| n.contains("fixed batch 1")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_load_paths_expose_default_effective_settings() {
+        let dynamic = tiny_fixture("phase2_tiny_dynamic.onnx");
+        let bytes = std::fs::read(&dynamic).expect("read fixture");
+        let via_path = Phase2Model::load_with_provider(&dynamic, ExecutionProviderKind::Cpu)
+            .expect("path load");
+        let via_memory =
+            Phase2Model::load_from_memory(&bytes, ExecutionProviderKind::Cpu).expect("memory");
+        let via_source = Phase2Model::load_from_source(
+            &ModelSource::Path(dynamic.clone()),
+            ExecutionProviderKind::Cpu,
+        )
+        .expect("source");
+        let via_source_with = Phase2Model::load_from_source_with(
+            &ModelSource::Path(dynamic.clone()),
+            &InferenceOptions::from(ExecutionProviderKind::Cpu),
+        )
+        .expect("source with options");
+        for model in [&via_path, &via_memory, &via_source, &via_source_with] {
+            let eff = model.effective();
+            assert_eq!(eff.provider, ExecutionProviderKind::Cpu);
+            assert_eq!(model.provider(), ExecutionProviderKind::Cpu);
+            assert_eq!(eff.model_batch, ModelBatchShape::Dynamic);
+            assert_eq!(eff.requested_batch_size, DEFAULT_BATCH_SIZE);
+            assert_eq!(eff.batch_size, DEFAULT_BATCH_SIZE);
+            assert!(eff.cuda.is_unset());
+            assert!(eff.notes.is_empty(), "{:?}", eff.notes);
+        }
+        assert_eq!(via_memory.model_path(), Path::new("<memory>"));
+        assert_eq!(via_source_with.model_path(), dynamic.as_path());
+    }
+
+    #[test]
+    fn load_with_options_missing_path_is_model_not_found() {
+        let missing = PathBuf::from("/tmp/holter-assist-missing-model-inference-options.onnx");
+        let err = match Phase2Model::load_with_options(
+            &missing,
+            &InferenceOptions::from(ExecutionProviderKind::Cpu),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("missing path must error"),
+        };
+        assert!(matches!(err, InferError::ModelNotFound(_)), "{err}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn unset_cuda_tuning_passes_nothing_to_cuda_ep() {
+        let untouched = format!("{:?}", ort::ep::CUDA::default());
+        let applied = format!(
+            "{:?}",
+            apply_cuda_tuning(ort::ep::CUDA::default(), &CudaTuning::default())
+        );
+        assert_eq!(applied, untouched);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn specified_cuda_tuning_sets_matching_ort_options() {
+        let tuning = CudaTuning {
+            tf32: Some(false),
+            conv1d_pad_to_nc1d: Some(true),
+            cuda_graph: Some(true),
+        };
+        let applied = format!("{:?}", apply_cuda_tuning(ort::ep::CUDA::default(), &tuning));
+        for (key, value) in [
+            ("use_tf32", "0"),
+            ("cudnn_conv1d_pad_to_nc1d", "1"),
+            ("enable_cuda_graph", "1"),
+        ] {
+            assert!(
+                applied.contains(&format!("{key:?}: {value:?}")),
+                "{key}={value} missing in {applied}"
+            );
+        }
+        assert!(!applied.contains("device_id"), "{applied}");
+
+        let only_tf32 = CudaTuning {
+            tf32: Some(true),
+            ..CudaTuning::default()
+        };
+        let applied = format!(
+            "{:?}",
+            apply_cuda_tuning(ort::ep::CUDA::default(), &only_tf32)
+        );
+        assert!(applied.contains("\"use_tf32\": \"1\""), "{applied}");
+        assert!(!applied.contains("cudnn_conv1d_pad_to_nc1d"), "{applied}");
+        assert!(!applied.contains("enable_cuda_graph"), "{applied}");
+    }
+
+    #[cfg(feature = "embedded-model")]
+    #[test]
+    fn load_from_source_with_embedded_exposes_effective_settings() {
+        let model = Phase2Model::load_from_source_with(
+            &ModelSource::Embedded,
+            &InferenceOptions::from(ExecutionProviderKind::Cpu),
+        )
+        .expect("embedded load_from_source_with");
+        assert_eq!(model.effective().provider, ExecutionProviderKind::Cpu);
+        assert_eq!(model.effective().requested_batch_size, DEFAULT_BATCH_SIZE);
+        assert!(model.batch_size() >= 1);
     }
 
     #[test]
