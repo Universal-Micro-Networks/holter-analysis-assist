@@ -291,6 +291,29 @@ HTTP では解析リクエストごとに別スレッドから同じ常駐モデ
 | | | | | 4.4 CUDA Graph | | | | | | | | | 成功 / 失敗箇所 |
 | | | | | 4.5 HTTP | — | — | — | — | — | — | — | | warmup_ms / 連続・同時の結果 |
 
+### 実測メモ（2026-09-28、速度のみ）
+
+`compare-accel` による精度比較ではなく、`analyze-ecl` の `perf:` 行から推論段階の速度だけを拾ったものです。
+
+- 端末: GeForce RTX 4080（ドライバ 610.88）、CUDA 13.4 / cuDNN 9.26
+- モデル: `phase2_rev1_dynamic.onnx`（`export_onnx.py --dynamic-batch --verify-batch 4` で再エクスポート。Keras との最大差 7.5e-5、バッチ 16 とバッチ 1 の最大差 2.4e-7）
+- ECL: 丸 1 日（5,082 窓）の先頭 1,008 窓、`--provider cuda`、チューニングは未指定（ONNX Runtime 既定）
+
+| batch_size | 推論 ms | windows/s（推論） | batch 1 比 |
+|---|---|---|---|
+| 1 | 31,459 | 32.0 | 1.0 |
+| 2 | 18,808 | 53.6 | 1.7 |
+| 3 | 15,886 | 63.5 | 2.0 |
+| 4 | 12,743 | 79.1 | 2.5 |
+| 8 | 10,935 | 92.2 | 2.9 |
+| 16 | 10,915 | 92.4 | 2.9 |
+| 32 | 12,066 | 83.5 | 2.6 |
+
+- 8 で頭打ちになり、32 では低下しました。推論中の GPU 使用率は 98%（240 W）で、演算そのものが律速です（1 窓あたり畳み込みだけで約 115 GFLOP、ONNX ノード 3,534 個）。
+- TF32 は ONNX Runtime 既定で有効です。`--cuda-tf32 false` にすると batch 16 で 79.4 windows/s に下がりました。
+- HTTP（丸 1 日 5,082 窓）での結果: batch 4 は推論 65.1 秒（78.1 windows/s）、batch 16 は 55.0〜56.3 秒（90〜92 windows/s）でした。batch 16 に `cuda_tf32=true` と `cuda_graph=true` を加えると 54.5 秒（93.3 windows/s）で、差はありませんでした。前処理・後処理・出力は合計約 2.7 秒です。
+- Windows 版 TensorFlow で `--verify-batch 16` を指定すると、Keras 側の推論中に Python が異常終了します（0xC0000005）。ONNX 自体は正常なので、この端末では `--verify-batch 4`（既定）で検証してください。
+
 ## 範囲外
 
 - 配布物（Windows インストーラ・Docker イメージ・Linux パッケージ）への新たなランタイムライブラリの同梱（CUDA Toolkit / cuDNN は利用者の環境に導入する）
