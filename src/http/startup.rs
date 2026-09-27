@@ -16,7 +16,7 @@ pub enum StartupError {
     HttpConfig(#[from] HttpConfigError),
     #[error("{0}")]
     License(#[from] LicenseError),
-    #[error("model load failed: {0}")]
+    #[error("model load or warm-up failed: {0}")]
     Model(#[from] InferError),
     #[error("bind failed on {addr}: {source}")]
     Bind {
@@ -96,4 +96,43 @@ pub async fn serve(http_config: HttpConfig) -> Result<(), StartupError> {
     axum::serve(listener, app)
         .await
         .map_err(StartupError::Serve)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference_options::{BatchSize, CudaTuning};
+    use crate::phase2::ExecutionProviderKind;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn serve_with_missing_model_fails_before_listening() {
+        let bind = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+            probe.local_addr().expect("probe addr").to_string()
+        };
+        let config = HttpConfig {
+            bind: bind.clone(),
+            max_body_bytes: 1024,
+            request_timeout: Duration::from_secs(30),
+            model_path: Some(PathBuf::from("/tmp/http-startup-missing-model.onnx")),
+            provider: ExecutionProviderKind::Cpu,
+            batch_size: BatchSize::default(),
+            cuda: CudaTuning::default(),
+        };
+
+        let err = serve(config).await.expect_err("missing model must fail");
+        assert!(matches!(err, StartupError::Model(_)), "{err}");
+        let message = err.to_string();
+        assert!(message.contains("warm-up"), "{message}");
+        assert!(
+            message.contains("http-startup-missing-model.onnx"),
+            "failure reason must name the model: {message}"
+        );
+        assert!(
+            std::net::TcpStream::connect(&bind).is_err(),
+            "must not listen on {bind} after a model failure"
+        );
+    }
 }

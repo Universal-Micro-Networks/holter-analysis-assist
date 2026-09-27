@@ -135,6 +135,8 @@ struct IniOpts<'a> {
     max_body_bytes: usize,
     model_path: &'a str,
     request_timeout_secs: u64,
+    /// Extra `[http]` lines (e.g. `batch_size=4\n`).
+    extra_http: &'a str,
 }
 
 impl Default for IniOpts<'static> {
@@ -147,6 +149,7 @@ impl Default for IniOpts<'static> {
                 "/tests/fixtures/phase2_tiny_dynamic.onnx"
             ),
             request_timeout_secs: 30,
+            extra_http: "",
         }
     }
 }
@@ -171,11 +174,12 @@ fn write_merged_ini_opts(
              request_timeout_secs={}\n\
              model_path={}\n\
              provider=cpu\n\
+             {}\
              \n\
              [license]\n\
              server_url={server_url}\n\
              timeout_secs=5\n",
-            opts.max_body_bytes, opts.request_timeout_secs, opts.model_path
+            opts.max_body_bytes, opts.request_timeout_secs, opts.model_path, opts.extra_http
         ),
     )
     .expect("write ini");
@@ -395,6 +399,88 @@ fn startup_license_ok_listens_and_health_returns_200() {
 }
 
 #[test]
+fn startup_missing_model_exits_nonzero_and_does_not_listen() {
+    let mock = MockLicenseServer::spawn(true, true);
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let missing = dir.path().join("missing-model.onnx");
+    let ini = write_merged_ini_opts(
+        &dir,
+        &bind,
+        mock.base_url(),
+        IniOpts {
+            model_path: missing.to_str().expect("utf8"),
+            ..IniOpts::default()
+        },
+    );
+
+    let output = assert_cmd::Command::cargo_bin("holter-http-api")
+        .expect("holter-http-api binary")
+        .args(["--config", ini.to_str().unwrap()])
+        .timeout(Duration::from_secs(30))
+        .output()
+        .expect("run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "missing model must exit non-zero; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("model load or warm-up failed") && stderr.contains("missing-model.onnx"),
+        "failure reason must be shown: {stderr}"
+    );
+    assert!(!stderr.contains("listening on"), "{stderr}");
+    assert!(
+        TcpStream::connect(&bind).is_err(),
+        "must not listen on {bind} when the model fails to load"
+    );
+}
+
+#[test]
+fn startup_logs_model_ready_with_configured_batch_before_listening() {
+    let mock = MockLicenseServer::spawn(true, true);
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let ini = write_merged_ini_opts(
+        &dir,
+        &bind,
+        mock.base_url(),
+        IniOpts {
+            extra_http: "batch_size=4\n",
+            ..IniOpts::default()
+        },
+    );
+
+    let mut child = spawn_ready(&ini, &bind);
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    let mut stderr = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .expect("piped stderr")
+        .read_to_string(&mut stderr)
+        .expect("read stderr");
+
+    let ready = stderr
+        .lines()
+        .position(|l| {
+            l.starts_with("holter-http-api: model ready provider=cpu batch_size=4 ")
+                && l.contains("model_batch=dynamic")
+                && l.contains("cuda_tuning=not_applied")
+                && l.contains("warmup_ms=")
+        })
+        .unwrap_or_else(|| panic!("ready log missing: {stderr}"));
+    let listening = stderr
+        .lines()
+        .position(|l| l.contains("listening on"))
+        .unwrap_or_else(|| panic!("listening log missing: {stderr}"));
+    assert!(ready < listening, "ready must precede listen: {stderr}");
+}
+
+#[test]
 fn analyze_request_meters_once_via_canonical_entry() {
     let mock = MockLicenseServer::spawn(true, true);
     let bind = free_bind_addr();
@@ -553,6 +639,7 @@ fn analyze_success_returns_csv_and_meters_once_when_sample_present() {
             max_body_bytes: 64 * 1024 * 1024,
             model_path: onnx_abs.to_str().expect("onnx utf8"),
             request_timeout_secs: 300,
+            ..IniOpts::default()
         },
     );
     let _child = spawn_ready(&ini, &bind);
