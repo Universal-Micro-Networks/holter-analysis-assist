@@ -3,6 +3,7 @@
 //! CLI is the first surface; the same types will back a future HTTP API.
 //! Phase-2 ONNX inference lives in [`phase2`] (BeatSense reference contract).
 
+pub mod accel_compare;
 pub mod analyze;
 pub mod dsp;
 #[cfg(feature = "embedded-model")]
@@ -11,6 +12,7 @@ pub mod http;
 pub mod inference_options;
 pub mod license;
 pub mod model_source;
+pub mod perf;
 pub mod phase2;
 pub mod postprocess;
 pub mod preprocess;
