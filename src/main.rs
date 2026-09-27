@@ -1,4 +1,10 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use holter_analysis_assist::accel_compare::report::{
+    to_markdown, CompareReport, Thresholds as CompareThresholds,
+};
+use holter_analysis_assist::accel_compare::{
+    run_compare, CompareConfig, DEFAULT_PROB_STRIDE, DEFAULT_REPORT_DIR, DEFAULT_TOLERANCE_SAMPLES,
+};
 use holter_analysis_assist::analyze::analyze_ecl_with_source;
 use holter_analysis_assist::inference_options::{
     parse_switch, BatchSize, CudaTuning, InferenceOptionsError, KEY_CUDA_CONV1D_PAD,
@@ -126,6 +132,15 @@ enum Commands {
         inference: InferenceArgs,
     },
 
+    /// Compare a candidate inference setting against the baseline (CPU, FP32,
+    /// batch size 1, no CUDA tuning) on the same ECLs.
+    ///
+    /// Writes `report.json`, `report.md` and per-ECL `baseline.csv` /
+    /// `candidate.csv` into `--report-dir` and prints the Markdown summary to
+    /// stdout. Each ECL is analyzed twice, so the license is metered twice per ECL.
+    #[command(after_help = COMPARE_EXIT_CODES)]
+    CompareAccel(CompareAccelArgs),
+
     /// Start the HTTP API + console UI (same as `holter-http-api`).
     ///
     /// Use this when Device Guard blocks `holter-http-api.exe`. Config must
@@ -231,6 +246,181 @@ fn parse_cuda_graph(raw: &str) -> Result<bool, InferenceOptionsError> {
     parse_switch(KEY_CUDA_GRAPH, raw)
 }
 
+const COMPARE_EXIT_CODES: &str = "\
+Exit codes:
+  0 = comparison finished and every given threshold passed (or none was given)
+  1 = error (license, model / candidate provider unavailable, analysis, I/O)
+  2 = comparison finished but a given threshold failed
+      (invalid command-line arguments also exit with 2, before any analysis)";
+
+#[derive(Args, Debug, Clone)]
+struct CompareAccelArgs {
+    /// Input ECL paths (one or more).
+    #[arg(value_name = "ECL", required = true, num_args = 1..)]
+    ecls: Vec<PathBuf>,
+
+    /// Phase-2 ONNX model path, used for both baseline and candidate. Omitted:
+    /// embedded model (embedded-model build) or `resources/models/phase2_rev1.onnx`
+    /// (development default).
+    #[arg(long)]
+    model: Option<PathBuf>,
+
+    // Candidate inference settings: same flags and values as `analyze-ecl`.
+    #[command(flatten)]
+    inference: InferenceArgs,
+
+    /// Beat matching tolerance in 500 Hz samples (integer >= 0; 40 = 80 ms).
+    #[arg(
+        long = "tolerance-samples",
+        value_name = "N",
+        default_value_t = DEFAULT_TOLERANCE_SAMPLES,
+        allow_negative_numbers = true
+    )]
+    tolerance_samples: u32,
+
+    /// Compare beat / event probabilities on every N-th window (integer >= 1);
+    /// rhythm scores are compared on every window. Baseline outputs of every
+    /// N-th window are kept in memory (~160 KB each: ~800 MB for 24 h at 1,
+    /// ~5.7 GB for 7 days); use a larger N for multi-day ECLs.
+    #[arg(
+        long = "prob-stride",
+        value_name = "N",
+        default_value_t = DEFAULT_PROB_STRIDE,
+        value_parser = parse_positive_count,
+        allow_negative_numbers = true
+    )]
+    prob_stride: usize,
+
+    /// Optional cap on number of 20s windows per ECL (integer >= 1).
+    #[arg(
+        long = "max-windows",
+        value_name = "N",
+        value_parser = parse_positive_count,
+        allow_negative_numbers = true
+    )]
+    max_windows: Option<usize>,
+
+    /// Output directory for the report and per-ECL CSVs (existing files are overwritten).
+    #[arg(long = "report-dir", value_name = "DIR", default_value = DEFAULT_REPORT_DIR)]
+    report_dir: PathBuf,
+
+    #[command(flatten)]
+    thresholds: ThresholdArgs,
+}
+
+/// Optional pass/fail thresholds on the aggregate metrics. No verdict is
+/// reported unless at least one is given.
+#[derive(Args, Debug, Clone, Copy)]
+struct ThresholdArgs {
+    /// Minimum rhythm (SR vs AF/AFL) window agreement rate, 0..=1.
+    #[arg(
+        long = "min-rhythm-window-agreement",
+        value_name = "RATE",
+        value_parser = parse_rate,
+        allow_negative_numbers = true
+    )]
+    min_rhythm_window_agreement: Option<f64>,
+
+    /// Minimum matched beat rate (lower of vs-baseline and vs-candidate), 0..=1.
+    #[arg(
+        long = "min-beat-match-rate",
+        value_name = "RATE",
+        value_parser = parse_rate,
+        allow_negative_numbers = true
+    )]
+    min_beat_match_rate: Option<f64>,
+
+    /// Minimum label agreement rate of matched beats, 0..=1.
+    #[arg(
+        long = "min-beat-class-agreement",
+        value_name = "RATE",
+        value_parser = parse_rate,
+        allow_negative_numbers = true
+    )]
+    min_beat_class_agreement: Option<f64>,
+
+    /// Maximum absolute probability difference (beat / event / rhythm), >= 0.
+    #[arg(
+        long = "max-prob-abs-diff",
+        value_name = "X",
+        value_parser = parse_non_negative,
+        allow_negative_numbers = true
+    )]
+    max_prob_abs_diff: Option<f64>,
+
+    /// Maximum matched beat offset in 500 Hz samples, >= 0.
+    #[arg(
+        long = "max-offset-samples",
+        value_name = "X",
+        value_parser = parse_non_negative,
+        allow_negative_numbers = true
+    )]
+    max_offset_samples: Option<f64>,
+}
+
+impl CompareAccelArgs {
+    fn into_config(self) -> CompareConfig {
+        let t = self.thresholds;
+        CompareConfig {
+            ecl_paths: self.ecls,
+            model: resolve_model_source(self.model),
+            candidate: self.inference.to_options(),
+            tolerance_samples: self.tolerance_samples,
+            prob_stride: self.prob_stride,
+            max_windows: self.max_windows,
+            thresholds: CompareThresholds {
+                min_rhythm_window_agreement: t.min_rhythm_window_agreement,
+                min_beat_match_rate: t.min_beat_match_rate,
+                min_beat_class_agreement: t.min_beat_class_agreement,
+                max_prob_abs_diff: t.max_prob_abs_diff,
+                max_offset_samples: t.max_offset_samples,
+            },
+            report_dir: self.report_dir,
+        }
+    }
+}
+
+fn parse_positive_count(raw: &str) -> Result<usize, String> {
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err("must be an integer >= 1".to_string()),
+    }
+}
+
+fn parse_finite(raw: &str) -> Option<f64> {
+    raw.trim().parse::<f64>().ok().filter(|x| x.is_finite())
+}
+
+fn parse_rate(raw: &str) -> Result<f64, String> {
+    parse_finite(raw)
+        .filter(|x| (0.0..=1.0).contains(x))
+        .ok_or_else(|| "must be a finite number in 0..=1".to_string())
+}
+
+fn parse_non_negative(raw: &str) -> Result<f64, String> {
+    parse_finite(raw)
+        .filter(|x| *x >= 0.0)
+        .ok_or_else(|| "must be a finite number >= 0".to_string())
+}
+
+/// Process exit status of a finished comparison ([`CompareReport::exit_code`]).
+fn compare_exit_status(report: &CompareReport) -> u8 {
+    u8::try_from(report.exit_code()).unwrap_or(1)
+}
+
+fn run_compare_accel(args: CompareAccelArgs) -> ExitCode {
+    match run_compare(&args.into_config()) {
+        Ok(report) => {
+            print!("{}", to_markdown(&report));
+            ExitCode::from(compare_exit_status(&report))
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct InferWindowReport {
     model: String,
@@ -327,6 +517,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Commands::CompareAccel(args) => run_compare_accel(args),
     }
 }
 
@@ -529,6 +720,144 @@ mod cli_inference_args_tests {
                 "{extra:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_compare_accel_tests {
+    use super::*;
+    use holter_analysis_assist::accel_compare::report::{
+        assemble_report, ConfigInfo, Verdict, EXIT_SUCCESS, EXIT_THRESHOLD_FAILED,
+    };
+
+    fn parse_compare(extra: &[&str]) -> Result<CompareConfig, clap::Error> {
+        let mut argv = vec!["holter-analysis-assist", "compare-accel", "a.ecl"];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv)?.command {
+            Commands::CompareAccel(args) => Ok(args.into_config()),
+            other => panic!("unexpected subcommand {other:?}"),
+        }
+    }
+
+    #[test]
+    fn omitted_options_use_design_defaults() {
+        let cfg = parse_compare(&["b.ecl"]).expect("parse");
+        assert_eq!(
+            cfg.ecl_paths,
+            vec![PathBuf::from("a.ecl"), PathBuf::from("b.ecl")]
+        );
+        assert_eq!(cfg.model, resolve_model_source(None));
+        assert_eq!(
+            cfg.candidate,
+            InferenceOptions::from(ExecutionProviderKind::Auto)
+        );
+        assert_eq!(cfg.tolerance_samples, 40);
+        assert_eq!(cfg.prob_stride, 1);
+        assert_eq!(cfg.max_windows, None);
+        assert_eq!(cfg.report_dir, PathBuf::from("output/accel_compare"));
+        assert!(cfg.thresholds.is_empty());
+    }
+
+    #[test]
+    fn options_map_to_compare_config() {
+        let cfg = parse_compare(&[
+            "--model",
+            "m.onnx",
+            "--provider",
+            "cuda",
+            "--batch-size",
+            "32",
+            "--cuda-graph",
+            "on",
+            "--tolerance-samples",
+            "10",
+            "--prob-stride",
+            "8",
+            "--max-windows",
+            "100",
+            "--report-dir",
+            "out/cmp",
+            "--min-rhythm-window-agreement",
+            "0.99",
+            "--min-beat-match-rate",
+            "0.98",
+            "--min-beat-class-agreement",
+            "0.97",
+            "--max-prob-abs-diff",
+            "0.01",
+            "--max-offset-samples",
+            "2",
+        ])
+        .expect("parse");
+        assert_eq!(cfg.model, ModelSource::Path(PathBuf::from("m.onnx")));
+        assert_eq!(cfg.candidate.provider, ExecutionProviderKind::Cuda);
+        assert_eq!(cfg.candidate.batch_size.get(), 32);
+        assert_eq!(cfg.candidate.cuda.cuda_graph, Some(true));
+        assert_eq!(cfg.tolerance_samples, 10);
+        assert_eq!(cfg.prob_stride, 8);
+        assert_eq!(cfg.max_windows, Some(100));
+        assert_eq!(cfg.report_dir, PathBuf::from("out/cmp"));
+        assert_eq!(
+            cfg.thresholds,
+            CompareThresholds {
+                min_rhythm_window_agreement: Some(0.99),
+                min_beat_match_rate: Some(0.98),
+                min_beat_class_agreement: Some(0.97),
+                max_prob_abs_diff: Some(0.01),
+                max_offset_samples: Some(2.0),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_values_are_value_validation_errors() {
+        for extra in [
+            ["--prob-stride", "0"],
+            ["--max-windows", "0"],
+            ["--tolerance-samples", "-1"],
+            ["--min-beat-match-rate", "1.0001"],
+            ["--min-rhythm-window-agreement", "-0.01"],
+            ["--min-beat-class-agreement", "nan"],
+            ["--max-prob-abs-diff", "NaN"],
+            ["--max-prob-abs-diff", "-0.001"],
+            ["--max-prob-abs-diff", "inf"],
+            ["--max-offset-samples", "inf"],
+            ["--max-offset-samples", "-0.5"],
+        ] {
+            let err = parse_compare(&extra).expect_err("must reject");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_status_follows_verdict() {
+        let cpu = InferenceOptions::from(ExecutionProviderKind::Cpu);
+        let mut report = assemble_report(
+            ConfigInfo::new(&cpu, None),
+            ConfigInfo::new(&cpu, None),
+            DEFAULT_TOLERANCE_SAMPLES,
+            Vec::new(),
+            &CompareThresholds::default(),
+        );
+        assert_eq!(i32::from(compare_exit_status(&report)), EXIT_SUCCESS);
+        report.verdict = Some(Verdict {
+            checks: Vec::new(),
+            passed: true,
+        });
+        assert_eq!(i32::from(compare_exit_status(&report)), EXIT_SUCCESS);
+        report.verdict = Some(Verdict {
+            checks: Vec::new(),
+            passed: false,
+        });
+        assert_eq!(
+            i32::from(compare_exit_status(&report)),
+            EXIT_THRESHOLD_FAILED
+        );
+        assert_eq!(compare_exit_status(&report), 2);
     }
 }
 
