@@ -1,5 +1,9 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use holter_analysis_assist::analyze::analyze_ecl_with_source;
+use holter_analysis_assist::inference_options::{
+    parse_switch, BatchSize, CudaTuning, InferenceOptionsError, KEY_CUDA_CONV1D_PAD,
+    KEY_CUDA_GRAPH, KEY_CUDA_TF32,
+};
 use holter_analysis_assist::license::{
     LicenseConfig, LicenseError, LicenseGate, ReqwestLicenseClient,
 };
@@ -118,9 +122,8 @@ enum Commands {
         #[arg(long)]
         max_windows: Option<usize>,
 
-        /// ONNX Runtime EP: `auto` (CUDA→CPU), `cuda`, or `cpu`.
-        #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
-        provider: ProviderArg,
+        #[command(flatten)]
+        inference: InferenceArgs,
     },
 
     /// Start the HTTP API + console UI (same as `holter-http-api`).
@@ -161,6 +164,71 @@ impl From<ProviderArg> for ExecutionProviderKind {
             ProviderArg::Cuda => Self::Cuda,
         }
     }
+}
+
+/// Inference settings shared by analysis subcommands. Flag names are the
+/// `[http]` ini keys with `_` replaced by `-`, and values use the same parsers.
+#[derive(Args, Debug, Clone, Copy)]
+struct InferenceArgs {
+    /// ONNX Runtime EP: `auto` (CUDA→CPU), `cuda`, or `cpu`.
+    #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
+    provider: ProviderArg,
+
+    /// Windows per inference call: integer 1..=256 (`[http] batch_size`). Default: 16.
+    #[arg(
+        long = "batch-size",
+        value_name = "N",
+        value_parser = parse_batch_size,
+        allow_negative_numbers = true
+    )]
+    batch_size: Option<BatchSize>,
+
+    /// CUDA TF32 math: true|false|on|off|1|0 (`[http] cuda_tf32`). Omitted: ONNX Runtime default.
+    #[arg(long = "cuda-tf32", value_name = "SWITCH", value_parser = parse_cuda_tf32)]
+    cuda_tf32: Option<bool>,
+
+    /// CUDA Conv1D pad-to-NC1D: true|false|on|off|1|0 (`[http] cuda_conv1d_pad_to_nc1d`).
+    /// Omitted: ONNX Runtime default.
+    #[arg(
+        long = "cuda-conv1d-pad-to-nc1d",
+        value_name = "SWITCH",
+        value_parser = parse_cuda_conv1d_pad
+    )]
+    cuda_conv1d_pad_to_nc1d: Option<bool>,
+
+    /// CUDA graph capture: true|false|on|off|1|0 (`[http] cuda_graph`). Omitted: ONNX Runtime default.
+    #[arg(long = "cuda-graph", value_name = "SWITCH", value_parser = parse_cuda_graph)]
+    cuda_graph: Option<bool>,
+}
+
+impl InferenceArgs {
+    fn to_options(self) -> InferenceOptions {
+        InferenceOptions {
+            provider: self.provider.into(),
+            batch_size: self.batch_size.unwrap_or_default(),
+            cuda: CudaTuning {
+                tf32: self.cuda_tf32,
+                conv1d_pad_to_nc1d: self.cuda_conv1d_pad_to_nc1d,
+                cuda_graph: self.cuda_graph,
+            },
+        }
+    }
+}
+
+fn parse_batch_size(raw: &str) -> Result<BatchSize, InferenceOptionsError> {
+    raw.parse()
+}
+
+fn parse_cuda_tf32(raw: &str) -> Result<bool, InferenceOptionsError> {
+    parse_switch(KEY_CUDA_TF32, raw)
+}
+
+fn parse_cuda_conv1d_pad(raw: &str) -> Result<bool, InferenceOptionsError> {
+    parse_switch(KEY_CUDA_CONV1D_PAD, raw)
+}
+
+fn parse_cuda_graph(raw: &str) -> Result<bool, InferenceOptionsError> {
+    parse_switch(KEY_CUDA_GRAPH, raw)
 }
 
 #[derive(Serialize)]
@@ -239,10 +307,10 @@ fn main() -> ExitCode {
             model,
             output,
             max_windows,
-            provider,
+            inference,
         } => {
             let source = resolve_model_source(model);
-            let options = InferenceOptions::from(ExecutionProviderKind::from(provider));
+            let options = inference.to_options();
             match analyze_ecl_with_source(&ecl, &source, &output, max_windows, &options) {
                 Ok((_rows, summary)) => {
                     println!("saved: {}", output.display());
@@ -250,6 +318,7 @@ fn main() -> ExitCode {
                     println!("windows: {}", summary.windows);
                     println!("Unknown=1: {}", summary.unknown_ones);
                     println!("short_run_flag=1: {}", summary.short_run_ones);
+                    summary.perf.emit_stderr();
                     ExitCode::SUCCESS
                 }
                 Err(err) => {
@@ -366,6 +435,98 @@ fn print_classify(result: &ClassificationResult, format: OutputFormat) {
             println!(
                 "{}",
                 serde_json::to_string_pretty(result).expect("serialize ClassificationResult")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_inference_args_tests {
+    use super::*;
+    use clap::CommandFactory;
+    use holter_analysis_assist::inference_options::{DEFAULT_BATCH_SIZE, KEY_BATCH_SIZE};
+
+    fn parse_analyze(extra: &[&str]) -> Result<InferenceOptions, clap::Error> {
+        let mut argv = vec!["holter-analysis-assist", "analyze-ecl", "x.ecl"];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv)?.command {
+            Commands::AnalyzeEcl { inference, .. } => Ok(inference.to_options()),
+            other => panic!("unexpected subcommand {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flag_names_are_ini_keys_with_dashes() {
+        let cmd = Cli::command();
+        let analyze = cmd
+            .find_subcommand("analyze-ecl")
+            .expect("analyze-ecl subcommand");
+        let longs: Vec<&str> = analyze
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .collect();
+        for key in [
+            KEY_BATCH_SIZE,
+            KEY_CUDA_TF32,
+            KEY_CUDA_CONV1D_PAD,
+            KEY_CUDA_GRAPH,
+        ] {
+            let long = key.replace('_', "-");
+            assert!(
+                longs.contains(&long.as_str()),
+                "missing --{long} in {longs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_options_keep_pre_feature_defaults() {
+        let opts = parse_analyze(&[]).expect("parse");
+        assert_eq!(opts.provider, ExecutionProviderKind::Auto);
+        assert_eq!(opts.batch_size.get(), DEFAULT_BATCH_SIZE);
+        assert!(opts.cuda.is_unset());
+        assert_eq!(opts, InferenceOptions::from(ExecutionProviderKind::Auto));
+    }
+
+    #[test]
+    fn options_map_to_inference_options() {
+        let opts = parse_analyze(&[
+            "--provider",
+            "cuda",
+            "--batch-size",
+            "64",
+            "--cuda-tf32",
+            "OFF",
+            "--cuda-graph",
+            "on",
+        ])
+        .expect("parse");
+        assert_eq!(opts.provider, ExecutionProviderKind::Cuda);
+        assert_eq!(opts.batch_size.get(), 64);
+        assert_eq!(
+            opts.cuda,
+            CudaTuning {
+                tf32: Some(false),
+                conv1d_pad_to_nc1d: None,
+                cuda_graph: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_values_are_value_validation_errors() {
+        for extra in [
+            ["--batch-size", "0"],
+            ["--batch-size", "257"],
+            ["--cuda-tf32", "yes"],
+            ["--cuda-conv1d-pad-to-nc1d", "2"],
+            ["--cuda-graph", "enable"],
+        ] {
+            let err = parse_analyze(&extra).expect_err("must reject");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{extra:?}"
             );
         }
     }
