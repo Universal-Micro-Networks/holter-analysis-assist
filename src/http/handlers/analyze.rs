@@ -7,6 +7,7 @@ use crate::analyze::{analyze_ecl_with_model, analyze_ecl_with_source, AnalyzeErr
 use crate::http::error::HttpError;
 use crate::http::response::ResponseCodec;
 use crate::http::state::{AppState, SharedModel};
+use crate::perf::AnalyzePerf;
 use crate::phase2::{ExecutionProviderKind, InferenceOptions};
 use crate::preprocess::parse_ecl_filename;
 use axum::extract::{DefaultBodyLimit, Multipart, State};
@@ -16,6 +17,7 @@ use axum::routing::post;
 use axum::Router;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Analyze HTTP adapter (design: AnalyzeHandler).
@@ -50,8 +52,8 @@ impl AnalyzeHandler {
 
         let model_source = state.model_source.clone();
         let shared = state.shared_model().clone();
-        let default_provider = state.provider();
-        let provider = parts.provider.unwrap_or(default_provider);
+        let startup = state.config.inference_options();
+        let provider = parts.provider.unwrap_or(startup.provider);
         let max_windows = parts.max_windows;
         let ecl_path = parts.ecl_path.clone();
         let format = parts.format;
@@ -64,6 +66,7 @@ impl AnalyzeHandler {
             run_analyze(
                 &shared,
                 &model_source,
+                &startup,
                 provider,
                 &ecl_path,
                 &out_csv,
@@ -79,32 +82,19 @@ impl AnalyzeHandler {
 
         let (rows, summary) = analyze_result.map_err(HttpError::from)?;
 
-        match format {
-            OutputFormat::Csv => {
-                let body = ResponseCodec::to_csv(&rows)?;
-                Ok((
-                    StatusCode::OK,
-                    [(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("text/csv; charset=utf-8"),
-                    )],
-                    body,
-                )
-                    .into_response())
-            }
-            OutputFormat::Json => {
-                let body = ResponseCodec::to_json(&rows, &summary)?;
-                Ok((
-                    StatusCode::OK,
-                    [(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    )],
-                    body,
-                )
-                    .into_response())
-            }
-        }
+        let encode_started = Instant::now();
+        let (content_type, body) = match format {
+            OutputFormat::Csv => ("text/csv; charset=utf-8", ResponseCodec::to_csv(&rows)?),
+            OutputFormat::Json => ("application/json", ResponseCodec::to_json(&rows, &summary)?),
+        };
+        eprintln!("{}", perf_log_line(&summary.perf, encode_started.elapsed()));
+
+        Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+            body,
+        )
+            .into_response())
     }
 
     /// Router fragment for `/v1/analyze` with body-size limit from AppState.
@@ -117,9 +107,31 @@ impl AnalyzeHandler {
     }
 }
 
+/// Options for a per-request session: the request's provider with the
+/// startup batch size and CUDA tuning.
+fn ephemeral_options(
+    startup: &InferenceOptions,
+    provider: ExecutionProviderKind,
+) -> InferenceOptions {
+    InferenceOptions {
+        provider,
+        ..*startup
+    }
+}
+
+/// Server-log line for one finished analyze request.
+fn perf_log_line(perf: &AnalyzePerf, response_encode: Duration) -> String {
+    format!(
+        "holter-http-api: {} response_encode_ms={:.1}",
+        perf.log_line(),
+        response_encode.as_secs_f64() * 1000.0
+    )
+}
+
 fn run_analyze(
     shared: &SharedModel,
     model_source: &crate::model_source::ModelSource,
+    startup: &InferenceOptions,
     provider: ExecutionProviderKind,
     ecl_path: &Path,
     out_csv: &Path,
@@ -153,7 +165,7 @@ fn run_analyze(
                     model_source,
                     out_csv,
                     max_windows,
-                    &InferenceOptions::from(provider),
+                    &ephemeral_options(startup, provider),
                 )
             } else {
                 analyze_ecl_with_model(ecl_path, &mut guard, out_csv, max_windows)
@@ -164,7 +176,7 @@ fn run_analyze(
             source,
             out_csv,
             max_windows,
-            &InferenceOptions::from(provider),
+            &ephemeral_options(startup, provider),
         ),
     }
 }
@@ -508,6 +520,97 @@ mod tests {
             joined.contains("spawn_blocking"),
             "sync analyze must run via spawn_blocking"
         );
+    }
+
+    fn startup_options() -> InferenceOptions {
+        InferenceOptions {
+            provider: ExecutionProviderKind::Cuda,
+            batch_size: BatchSize::new(4).unwrap(),
+            cuda: CudaTuning {
+                tf32: Some(true),
+                conv1d_pad_to_nc1d: Some(false),
+                cuda_graph: Some(true),
+            },
+        }
+    }
+
+    #[test]
+    fn ephemeral_options_keep_startup_batch_size_and_cuda_tuning() {
+        let startup = startup_options();
+        let opts = ephemeral_options(&startup, ExecutionProviderKind::Cpu);
+        assert_eq!(opts.provider, ExecutionProviderKind::Cpu);
+        assert_eq!(opts.batch_size, startup.batch_size);
+        assert_eq!(opts.cuda, startup.cuda);
+    }
+
+    fn tiny_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase2_tiny_dynamic.onnx")
+    }
+
+    /// 24 h ECL (minimum accepted size) with QRS-like pulses at 250 Hz;
+    /// the filename declares an 11-minute recording.
+    fn write_synthetic_ecl(dir: &Path) -> PathBuf {
+        let n = crate::preprocess::EXPECTED_24H_SAMPLES_250;
+        let mut bytes = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let phase = (i % 199) as f32 - 99.0;
+            let value = 400.0 * (-(phase * phase) / 4.0).exp() + 20.0 * (i as f32 * 0.004).sin();
+            let raw12 = (0x0800 + value.round() as i32).clamp(0, 0x0FFF) as u16;
+            let word = ((raw12 & 0x0F00) << 4) | (raw12 & 0x00FF);
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let path = dir.join("1234567890_20250101_0000_0011.ecl");
+        std::fs::write(&path, bytes).expect("write synthetic ECL");
+        path
+    }
+
+    #[test]
+    fn ephemeral_session_receives_startup_batch_size_and_cuda_tuning() {
+        let dir = TempDir::new().expect("tempdir");
+        let ecl = write_synthetic_ecl(dir.path());
+        let out_csv = dir.path().join("beat_results.csv");
+        let source = ModelSource::Path(tiny_fixture());
+        let startup = startup_options();
+
+        let (_rows, summary) = with_gate(MockOutcome::Success { message: None }, |meter_calls| {
+            let result = run_analyze(
+                &SharedModel::Ephemeral(source.clone()),
+                &source,
+                &startup,
+                ExecutionProviderKind::Cpu,
+                &ecl,
+                &out_csv,
+                Some(5),
+            )
+            .expect("ephemeral analyze");
+            assert_eq!(meter_calls.load(Ordering::SeqCst), 1, "one meter per job");
+            result
+        });
+
+        let eff = summary.perf.effective.as_ref().expect("effective settings");
+        assert_eq!(eff.provider, ExecutionProviderKind::Cpu);
+        assert_eq!(eff.requested_batch_size, 4);
+        assert_eq!(eff.batch_size, 4);
+        assert_eq!(eff.cuda, startup.cuda);
+        assert!(!eff.cuda_applied, "CPU session must not apply CUDA tuning");
+    }
+
+    #[test]
+    fn perf_log_line_prefixes_server_tag_and_appends_response_encode_ms() {
+        let perf = AnalyzePerf {
+            windows: 38,
+            ..AnalyzePerf::default()
+        };
+        let line = perf_log_line(&perf, Duration::from_micros(2_345));
+        assert_eq!(
+            line,
+            format!(
+                "holter-http-api: {} response_encode_ms=2.3",
+                perf.log_line()
+            )
+        );
+        assert!(line.starts_with("holter-http-api: perf: "), "{line}");
+        assert!(!line.contains('\n'), "{line}");
     }
 
     #[test]
