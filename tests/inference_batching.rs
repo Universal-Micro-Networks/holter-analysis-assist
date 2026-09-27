@@ -206,6 +206,100 @@ fn fixed1_model_runs_one_window_per_call_and_rejects_more() {
 }
 
 #[test]
+fn cuda_graph_request_on_cpu_runs_actual_count_without_padding() {
+    let options = InferenceOptions {
+        provider: ExecutionProviderKind::Cpu,
+        batch_size: BatchSize::new(4).unwrap(),
+        cuda: CudaTuning {
+            cuda_graph: Some(true),
+            ..CudaTuning::default()
+        },
+    };
+    let mut model = Phase2Model::load_with_options(fixture(DYNAMIC), &options).expect("load");
+    let eff = model.effective();
+    assert!(!eff.cuda_graph_active);
+    assert!(!eff.pad_tail);
+    assert_eq!(model.batch_size(), 4);
+
+    let reference = per_window_reference(7);
+    let flat = flat_windows(7);
+    let mut outputs = Vec::new();
+    for chunk in flat.chunks(4 * WINDOW_SAMPLES) {
+        outputs.extend(
+            model
+                .infer_batch(chunk, chunk.len() / WINDOW_SAMPLES)
+                .expect("infer_batch"),
+        );
+    }
+    assert_eq!(outputs.len(), 7);
+    for (k, (got, want)) in outputs.iter().zip(&reference).enumerate() {
+        assert_same(&format!("window {k}"), got, want);
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn assert_close(ctx: &str, got: &WindowOutputs, want: &WindowOutputs) {
+    const TOL: f32 = 1e-5;
+    let close = |a: f32, b: f32| (a - b).abs() <= TOL;
+    assert!(close(got.rhythm, want.rhythm), "{ctx}: rhythm");
+    for (i, (a, b)) in got.beat.iter().zip(&want.beat).enumerate() {
+        assert!(close(*a, *b), "{ctx}: beat[{i}] {a} vs {b}");
+    }
+    for (i, (a, b)) in got.event.iter().zip(&want.event).enumerate() {
+        assert!(
+            a.iter().zip(b).all(|(x, y)| close(*x, *y)),
+            "{ctx}: event[{i}] {a:?} vs {b:?}"
+        );
+    }
+}
+
+/// Needs a CUDA-capable GPU; skipped when the CUDA provider cannot be loaded.
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_graph_on_gpu_matches_cpu_across_repeated_and_tail_batches() {
+    let cuda = |cuda_graph: Option<bool>| InferenceOptions {
+        provider: ExecutionProviderKind::Cuda,
+        batch_size: BatchSize::new(4).unwrap(),
+        cuda: CudaTuning {
+            cuda_graph,
+            ..CudaTuning::default()
+        },
+    };
+    if let Err(e) = Phase2Model::load_with_options(fixture(DYNAMIC), &cuda(None)) {
+        eprintln!("skip: CUDA provider unavailable ({e})");
+        return;
+    }
+    let mut model = Phase2Model::load_with_options(fixture(DYNAMIC), &cuda(Some(true)))
+        .expect("CUDA loads, so the cuda_graph session must load too");
+    let eff = model.effective();
+    assert!(eff.cuda_graph_active);
+    assert!(eff.pad_tail);
+    assert_eq!(model.batch_size(), 4);
+
+    model.warm_up().expect("warm_up captures the CUDA graph");
+
+    let total = 11;
+    let reference = per_window_reference(total);
+    let flat = flat_windows(total);
+    for round in 0..2 {
+        let mut outputs = Vec::new();
+        for chunk in flat.chunks(4 * WINDOW_SAMPLES) {
+            let count = chunk.len() / WINDOW_SAMPLES;
+            let got = model.infer_batch(chunk, count).expect("infer_batch");
+            assert_eq!(got.len(), count);
+            outputs.extend(got);
+        }
+        assert_eq!(outputs.len(), total);
+        for (k, (got, want)) in outputs.iter().zip(&reference).enumerate() {
+            assert_close(&format!("round {round} window {k}"), got, want);
+        }
+    }
+
+    let single = model.infer_window(&window(5)).expect("infer_window");
+    assert_close("infer_window", &single, &reference[5]);
+}
+
+#[test]
 fn warm_up_runs_effective_batch_and_returns_elapsed_time() {
     for (name, batch) in [(DYNAMIC, 16), (DYNAMIC, 1), (FIXED1, 16)] {
         let mut model = load_cpu(name, batch);

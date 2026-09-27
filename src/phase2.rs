@@ -5,18 +5,20 @@
 //! - input `ecg`: `(B, 10000, 1)` float32 NTC
 //! - outputs: `beat`, `event` `[PAC,PVC,N]`, `rhythm` (AF/AFL vs SR)
 
-use crate::inference_options::{BatchSize, CudaTuning};
+use crate::inference_options::{BatchSize, CudaTuning, KEY_CUDA_GRAPH};
 use crate::model_source::{ModelSource, ModelSourceError};
 use ndarray::Array3;
 use ort::session::builder::SessionBuilder;
 use ort::session::Session;
-use ort::value::TensorRef;
+use ort::value::{DynValue, TensorRef};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod batch_plan;
+#[cfg(feature = "cuda")]
+mod cuda_graph;
 
 pub use batch_plan::{plan_batch, BatchPlan};
 
@@ -153,6 +155,8 @@ pub enum InferError {
     BadShape { name: &'static str, detail: String },
     #[error("execution provider '{0}' is not available on this platform")]
     ProviderUnavailable(String),
+    #[error("CUDA graph failed ({0}); set {KEY_CUDA_GRAPH}=false to disable CUDA graph")]
+    CudaGraph(String),
 }
 
 /// ONNX Runtime execution provider selection.
@@ -254,6 +258,16 @@ pub struct Phase2Model {
     session: Session,
     model_path: PathBuf,
     effective: EffectiveInference,
+    /// Present exactly when `effective.cuda_graph_active`.
+    #[cfg(feature = "cuda")]
+    cuda_graph: Option<cuda_graph::CudaGraphRunner>,
+}
+
+/// Flat `beat [B,10000,1]`, `event [B,10000,3]`, `rhythm [B,1]` of one run.
+pub(crate) struct RawBatchOutputs {
+    pub beat: Vec<f32>,
+    pub event: Vec<f32>,
+    pub rhythm: Vec<f32>,
 }
 
 impl Phase2Model {
@@ -416,7 +430,9 @@ impl Phase2Model {
         options: &InferenceOptions,
     ) -> Result<Self, InferError> {
         let mut builder = Self::session_builder_for_provider(provider, &options.cuda)?;
-        let session = builder.commit_from_file(path)?;
+        let session = builder
+            .commit_from_file(path)
+            .map_err(|e| commit_error(e, provider, &options.cuda))?;
         Self::with_effective(session, path.to_path_buf(), provider, options)
     }
 
@@ -427,7 +443,9 @@ impl Phase2Model {
         model_path: PathBuf,
     ) -> Result<Self, InferError> {
         let mut builder = Self::session_builder_for_provider(provider, &options.cuda)?;
-        let session = builder.commit_from_memory(model_bytes)?;
+        let session = builder
+            .commit_from_memory(model_bytes)
+            .map_err(|e| commit_error(e, provider, &options.cuda))?;
         Self::with_effective(session, model_path, provider, options)
     }
 
@@ -455,8 +473,17 @@ impl Phase2Model {
             eprintln!("warning: {note}");
         }
 
+        #[cfg(feature = "cuda")]
+        let cuda_graph = if cuda_graph_active {
+            Some(cuda_graph::CudaGraphRunner::new(&session, plan.size)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             session,
+            #[cfg(feature = "cuda")]
+            cuda_graph,
             model_path,
             effective: EffectiveInference {
                 provider,
@@ -515,20 +542,46 @@ impl Phase2Model {
         }
 
         let run_count = if self.effective.pad_tail { max } else { count };
-        let input = Array3::from_shape_vec(
-            (run_count, WINDOW_SAMPLES, INPUT_CHANNELS),
-            padded_input(windows, run_count),
-        )
-        .expect("shape matches length");
+        let flat = padded_input(windows, run_count);
 
+        #[cfg(feature = "cuda")]
+        let raw = match self.cuda_graph.as_mut() {
+            Some(runner) => runner.run(&mut self.session, &flat)?,
+            None => self.run_session(flat, run_count)?,
+        };
+        #[cfg(not(feature = "cuda"))]
+        let raw = self.run_session(flat, run_count)?;
+
+        Ok(split_window_outputs(
+            &raw.beat,
+            &raw.event,
+            &raw.rhythm,
+            count,
+        ))
+    }
+
+    fn run_session(
+        &mut self,
+        flat: Vec<f32>,
+        run_count: usize,
+    ) -> Result<RawBatchOutputs, InferError> {
+        let input = Array3::from_shape_vec((run_count, WINDOW_SAMPLES, INPUT_CHANNELS), flat)
+            .expect("shape matches length");
         let outputs = self.session.run(ort::inputs![
             INPUT_NAME => TensorRef::from_array_view(&input)?
         ])?;
-
-        let beat = extract_named_flat(&outputs, "beat", run_count * WINDOW_SAMPLES)?;
-        let event = extract_named_flat(&outputs, "event", run_count * WINDOW_SAMPLES * 3)?;
-        let rhythm = extract_named_flat(&outputs, "rhythm", run_count)?;
-        Ok(split_window_outputs(&beat, &event, &rhythm, count))
+        let named = |name: &'static str, len: usize| {
+            extract_flat(
+                outputs.get(name).ok_or(InferError::MissingOutput(name))?,
+                name,
+                len,
+            )
+        };
+        Ok(RawBatchOutputs {
+            beat: named("beat", run_count * WINDOW_SAMPLES)?,
+            event: named("event", run_count * WINDOW_SAMPLES * 3)?,
+            rhythm: named("rhythm", run_count)?,
+        })
     }
 
     /// One inference over `batch_size()` zero windows; returns its wall time.
@@ -669,12 +722,28 @@ fn ensure_ort_dylib_search_path() {
     }
 }
 
-fn extract_named_flat(
-    outputs: &ort::session::SessionOutputs<'_>,
+/// Graph-capture feasibility is checked when the session is built, so such
+/// commit failures are CUDA graph failures; everything else stays an ort error.
+fn commit_error(
+    err: ort::Error,
+    provider: ExecutionProviderKind,
+    tuning: &CudaTuning,
+) -> InferError {
+    let is_capture = provider == ExecutionProviderKind::Cuda
+        && tuning.wants_cuda_graph()
+        && err.message().contains("graph capture");
+    if is_capture {
+        InferError::CudaGraph(err.to_string())
+    } else {
+        InferError::Ort(err)
+    }
+}
+
+fn extract_flat(
+    value: &DynValue,
     name: &'static str,
     expected_len: usize,
 ) -> Result<Vec<f32>, InferError> {
-    let value = outputs.get(name).ok_or(InferError::MissingOutput(name))?;
     let (shape, data) = value.try_extract_tensor::<f32>()?;
     let len: usize = shape.iter().map(|d| *d as usize).product();
     if len != expected_len {
@@ -1024,6 +1093,53 @@ mod tests {
             .infer_window(&smoke_samples())
             .expect("inference continues on cpu");
         assert_eq!(out.beat.len(), WINDOW_SAMPLES);
+    }
+
+    #[test]
+    fn cuda_graph_request_on_cpu_keeps_plain_session_path() {
+        let tuning = CudaTuning {
+            cuda_graph: Some(true),
+            ..CudaTuning::default()
+        };
+        let mut model = Phase2Model::load_with_options(
+            tiny_fixture("phase2_tiny_dynamic.onnx"),
+            &cpu_options(4, tuning),
+        )
+        .expect("load");
+        assert!(!model.effective().cuda_graph_active);
+        #[cfg(feature = "cuda")]
+        assert!(model.cuda_graph.is_none(), "no fixed-buffer runner on cpu");
+        let windows = [smoke_samples(), smoke_samples(), smoke_samples()].concat();
+        let out = model.infer_batch(&windows, 3).expect("plain path");
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn cuda_graph_error_tells_user_to_disable_it() {
+        let msg = InferError::CudaGraph("capture failed".into()).to_string();
+        assert!(msg.contains("capture failed"), "{msg}");
+        assert!(msg.contains("cuda_graph=false"), "{msg}");
+    }
+
+    #[test]
+    fn graph_capture_commit_errors_become_cuda_graph_errors() {
+        let capture = ort::Error::new(
+            "This session cannot use the graph capture feature as requested by the user",
+        );
+        let tuning = CudaTuning {
+            cuda_graph: Some(true),
+            ..CudaTuning::default()
+        };
+        let err = commit_error(capture, ExecutionProviderKind::Cuda, &tuning);
+        assert!(matches!(err, InferError::CudaGraph(_)), "{err}");
+
+        let other = ort::Error::new("CUDA driver missing");
+        let err = commit_error(other, ExecutionProviderKind::Cuda, &tuning);
+        assert!(matches!(err, InferError::Ort(_)), "{err}");
+
+        let capture = ort::Error::new("graph capture");
+        let err = commit_error(capture, ExecutionProviderKind::Cuda, &CudaTuning::default());
+        assert!(matches!(err, InferError::Ort(_)), "{err}");
     }
 
     #[test]
