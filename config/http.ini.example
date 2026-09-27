@@ -37,6 +37,59 @@ bind=0.0.0.0:8080
 # provider=auto
 
 # ---------------------------------------------------------------------------
+# Inference acceleration (optional; owned by the inference-acceleration spec)
+# ---------------------------------------------------------------------------
+# Leaving all four keys unset keeps the pre-acceleration behavior except that
+# batching is 16 windows per call on models with a dynamic batch dimension
+# (output CSV / JSON contract is unchanged). The CLI uses the same names and
+# values as options: `_` -> `-` (e.g. --batch-size, --cuda-graph).
+# Invalid values stop startup with a config error (before the license check).
+# The model is loaded and warmed up with these settings before listening; see
+# the "model ready provider=... batch_size=... warmup_ms=..." log line.
+#
+# Optional. Windows (20 s each) per inference call. Allowed: integer 1..256.
+# Default: 16.
+# Models with a fixed batch dimension (e.g. the current phase2_rev1.onnx,
+# fixed batch 1) always use the model's batch; a different value (including
+# the unset default 16) is ignored with
+# "warning: model has fixed batch 1; batch_size=16 is ignored".
+# Re-export with --dynamic-batch to use batching (tools/export/README.md).
+# Larger values need more GPU memory.
+# batch_size=16
+
+# CUDA tuning switches. Allowed (case-insensitive): true | false | on | off | 1 | 0
+# Unset = not passed to ONNX Runtime (its own default; same as before this
+# feature). Applied only when the resolved provider is cuda; with cpu (or auto
+# falling back to cpu) they are ignored with a "warning:" line.
+#
+# Optional. Allow TF32 math on Ampere or newer GPUs. Unset: ONNX Runtime default
+# (TF32 enabled). Set false to compare pure FP32 math.
+# cuda_tf32=false
+#
+# Optional. Pad Conv1D input to NC1D for cuDNN. Unset: ONNX Runtime default
+# (disabled).
+# cuda_conv1d_pad_to_nc1d=true
+#
+# Optional. Capture and replay a CUDA graph. Unset: ONNX Runtime default
+# (disabled). When enabled, every call runs with the full effective batch_size
+# (the last partial batch is zero-padded; padding outputs are dropped).
+# With provider=auto, a CUDA graph failure found while creating the CUDA
+# session falls back to cpu (stderr notice), but a capture failure during
+# warm-up stops startup (message suggests cuda_graph=false); with
+# provider=cuda both stop startup. Verify on the target GPU first
+# (docs/perf/windows-gpu-benchmark.md) before enabling in production.
+# cuda_graph=true
+#
+# Valid combinations:
+#   - batch_size works with every provider (auto / cpu / cuda).
+#   - cuda_tf32 / cuda_conv1d_pad_to_nc1d / cuda_graph take effect only with
+#     provider=cuda, or provider=auto when CUDA is available. Each switch can be
+#     set independently of the others.
+#   - cuda_graph=true with a fixed-batch model runs at the model's batch.
+# Out of scope: TensorRT, FP16 / INT8, multiple GPUs (GPU device 0 only).
+# No new runtime is bundled in the distribution; install CUDA / cuDNN yourself.
+
+# ---------------------------------------------------------------------------
 # Manual smoke (NOT required in CI) — real license server + embedded binary
 # ---------------------------------------------------------------------------
 # When upstream license server and a `release-embedded-http-api` artifact are
