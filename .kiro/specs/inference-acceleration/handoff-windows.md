@@ -17,15 +17,10 @@
 | `8d9bf5a` | 1.3 極小 ONNX フィクスチャ（`tests/fixtures/`）と `http_api_listen` テストの修正 |
 | `213f2d4` | 1.2 `perf` / `accel_compare` の空骨格 |
 | `84ed77c` | 2.1 BatchPlan（`src/phase2/batch_plan.rs`、`ModelBatchShape`） |
+| `246c486` | 2.6 比較用の精度指標（`src/accel_compare/metrics.rs`） |
+| `6440ac5` | 2.2 設定付きモデル読込み・CUDA チューニング・実効設定（`src/phase2.rs`） |
 
-`tasks.md` 上は 1.1〜1.4 と 2.1 が `[x]`。
-
-### push に含まれていないもの（Mac 側で作業中だった）
-
-- **2.6 比較用の精度指標**（`src/accel_compare/metrics.rs`）: 実装済み・レビュー中。
-- **2.2 設定付きモデル読込み・CUDA チューニング**（`src/phase2.rs`）: 実装中。
-
-Mac 側でこの 2 つを仕上げて push するか、破棄して Windows でやり直すかは別途決めます。**Windows で作業を始める前に `git pull` で最新を取り込み、`tasks.md` の `[x]` で実際の進捗を確認してください。**
+`tasks.md` 上は 1.1〜1.4、2.1、2.2、2.6 が `[x]`（20 タスク中 7 つ）。Mac 側の作業はここで止めており、未コミット・未 push の変更はありません。**Windows では `git pull` 後、次は 2.3 から再開します**（2.5 も 2.2 完了で着手可能）。
 
 ## 2. Windows 環境の準備
 
@@ -55,11 +50,9 @@ $env:PATH = "C:\Program Files\NVIDIA\CUDNN\v9.26\bin\13.4\x64;$env:CUDA_PATH\bin
 
 | タスク | 内容 | 依存 |
 |---|---|---|
-| 2.2 | 設定付き読込み・CUDA チューニング・実効設定 | 1.3, 2.1 |
 | 2.3 | まとめ推論 `infer_batch` と暖機 `warm_up` | 2.2 |
 | 2.4 | CUDA Graph 用の固定バッファ実行経路 | 2.2, 2.3 |
 | 2.5 | 段階別計測と診断ログ（`src/perf.rs`） | 1.2, 2.2 |
-| 2.6 | 比較用の精度指標（`src/accel_compare/metrics.rs`） | 1.2 |
 | 2.7 | 比較レポートと閾値判定 | 2.5, 2.6 |
 | 3.1 | 解析パイプラインのまとめ推論・計測対応 | 2.3, 2.5 |
 | 3.2〜3.5 | HTTP 設定キー → CLI オプション → HTTP 暖機 → HTTP ハンドラ | 3.1 以降 |
@@ -87,10 +80,13 @@ cargo check --no-default-features   # cuda 機能なしでもビルドできる�
 - **cuda 機能の cfg 分岐**: CUDA EP 固有の API（`with_tf32` / `with_conv1d_pad_to_nc1d` / `with_cuda_graph`、IoBinding の CUDA アロケータ）は `#[cfg(feature = "cuda")]` で囲み、`--no-default-features` でもビルドできるようにする。
 - **ライセンス計上**: 正本入口 `analyze_ecl_with_source` の中でジョブあたり 1 回。新しく計上する公開入口を増やさない。比較サブコマンドは ECL あたり 2 回（基準と候補）計上する設計。
 
-## 6. レビュー中に出た判断事項（引き継ぎ先で確認）
+## 6. レビューからの申し送り（後続タスクで必ず反映）
 
-- **2.6**: 分母 0 のときの一致率を 1.0（比べるものがなければ一致）としている。既存の `tools/compare/compare_pipelines.py` は 0.0。基準に拍があり候補が 0 拍のときに閾値判定で見逃さないか、レビューで確認中。
-- **2.1**: 固定バッチモデルで要求値が無視されたときの警告文は英語（`model has fixed batch {n}; batch_size={requested} is ignored`）。他の警告文と言語を揃える。
+- **2.4（最重要）**: 2.2 で `cuda_graph=Some(true)` のとき CUDA EP に `with_cuda_graph(true)` を渡すようにしたが、固定アドレスで実行する経路（IoBinding の CudaGraphRunner）はまだ無い。現状 `cuda_graph_active=true` でも通常の `session.run` を通るため、GPU では失敗または誤った結果になり得る。**2.4 で `cuda_graph_active` のとき CudaGraphRunner 経由に切り替え、常に `[batch_size,10000,1]` の形状で実行することを、3.2 / 3.3（CLI・ini から cuda_graph を指定可能にする）より前に完了させる。** 現時点では利用者が cuda_graph を指定できる経路は無い。
+- **2.7**: 2.6 の指標は分母 0 の率を 1.0（比較対象なし＝一致）としている。基準に拍があり候補が 0 拍のとき、`match_rate_vs_baseline` は 0.0 になるので異常は隠れないが、`match_rate_vs_candidate` や対応拍ベースの一致率は 1.0、位置ずれは 0 になる。閾値 `min_beat_match_rate` は `match_rate_vs_baseline`（または 2 つの率の小さい方）で判定し、人向け要約では `matched_beats=0` のときの 1.0 が「比較対象なし」だと分かるように表示する。最大差の閾値は `actual <= max` の形で書き、NaN（JSON では null）が不合格になるようにする。
+- **3.6**: 2.6 で追加した `MetricsError`（`beat_time` の解析失敗）を受ける変種が design の `CompareError` に無い。3.6 で変種を足すか変換方法を決める。
+- **2.1**: 固定バッチモデルで要求値が無視されたときの警告文は英語（`model has fixed batch {n}; batch_size={requested} is ignored`）。2.2 以降の警告は stderr に `warning: {note}` の書式で出る。他の警告文と言語を揃える。
+- **2.2**: `cuda_applied` は解決後のプロバイダが CUDA なら（チューニング未指定でも）true。ログの `cuda_tuning=` 表示は `CudaTuning::describe()` から作る。
 
 ## 7. Windows GPU 端末で確認が必要なこと
 
