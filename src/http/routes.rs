@@ -46,6 +46,7 @@ async fn map_timeout_to_http_error(req: Request, next: Next) -> Response {
 mod tests {
     use super::*;
     use crate::http::config::HttpConfig;
+    use crate::inference_options::{BatchSize, CudaTuning};
     use crate::license::{
         LicenseCheckResult, LicenseClient, LicenseError, LicenseGate, LicenseMeterResult,
         MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
@@ -85,6 +86,8 @@ mod tests {
                 request_timeout: Duration::from_secs(30),
                 model_path: Some(PathBuf::from("/tmp/routes-test-missing.onnx")),
                 provider: ExecutionProviderKind::Cpu,
+                batch_size: BatchSize::default(),
+                cuda: CudaTuning::default(),
             },
             ModelSource::Path(PathBuf::from("/tmp/routes-test-missing.onnx")),
         )

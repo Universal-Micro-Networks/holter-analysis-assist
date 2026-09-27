@@ -101,6 +101,7 @@ fn resolve_model_source(model_path: Option<&PathBuf>) -> ModelSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference_options::{BatchSize, CudaTuning};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -111,6 +112,8 @@ mod tests {
             request_timeout: Duration::from_secs(30),
             model_path,
             provider: ExecutionProviderKind::Cpu,
+            batch_size: BatchSize::default(),
+            cuda: CudaTuning::default(),
         }
     }
 

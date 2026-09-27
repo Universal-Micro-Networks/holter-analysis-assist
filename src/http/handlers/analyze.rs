@@ -341,6 +341,7 @@ mod tests {
     use super::*;
     use crate::http::config::HttpConfig;
     use crate::http::response::ResponseCodec;
+    use crate::inference_options::{BatchSize, CudaTuning};
     use crate::license::{
         LicenseCheckResult, LicenseClient, LicenseError, LicenseGate, LicenseMeterResult,
         MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
@@ -391,6 +392,8 @@ mod tests {
             request_timeout: Duration::from_secs(1800),
             model_path,
             provider: ExecutionProviderKind::Cpu,
+            batch_size: BatchSize::default(),
+            cuda: CudaTuning::default(),
         }
     }
 

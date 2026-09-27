@@ -4,7 +4,11 @@
 //! that sample). `[license]` keys are owned by `config/license.ini.example`
 //! and must not be redefined here.
 
-use crate::phase2::ExecutionProviderKind;
+use crate::inference_options::{
+    parse_switch, BatchSize, CudaTuning, KEY_BATCH_SIZE, KEY_CUDA_CONV1D_PAD, KEY_CUDA_GRAPH,
+    KEY_CUDA_TF32,
+};
+use crate::phase2::{ExecutionProviderKind, InferenceOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -37,9 +41,20 @@ pub struct HttpConfig {
     pub request_timeout: Duration,
     pub model_path: Option<PathBuf>,
     pub provider: ExecutionProviderKind,
+    pub batch_size: BatchSize,
+    pub cuda: CudaTuning,
 }
 
 impl HttpConfig {
+    /// Requested inference settings: `provider` + `batch_size` + CUDA tuning.
+    pub fn inference_options(&self) -> InferenceOptions {
+        InferenceOptions {
+            provider: self.provider,
+            batch_size: self.batch_size,
+            cuda: self.cuda,
+        }
+    }
+
     /// Load and validate `[http]` settings from `path`.
     ///
     /// Fail-closed: missing file, missing section/`bind`, or invalid values
@@ -99,12 +114,33 @@ impl HttpConfig {
             None => ExecutionProviderKind::Auto,
         };
 
+        let batch_size = match section.get(KEY_BATCH_SIZE) {
+            Some(raw) => raw
+                .parse::<BatchSize>()
+                .map_err(|e| config_err(e.to_string()))?,
+            None => BatchSize::default(),
+        };
+
+        let switch = |key: &'static str| -> Result<Option<bool>, HttpConfigError> {
+            section
+                .get(key)
+                .map(|raw| parse_switch(key, raw).map_err(|e| config_err(e.to_string())))
+                .transpose()
+        };
+        let cuda = CudaTuning {
+            tf32: switch(KEY_CUDA_TF32)?,
+            conv1d_pad_to_nc1d: switch(KEY_CUDA_CONV1D_PAD)?,
+            cuda_graph: switch(KEY_CUDA_GRAPH)?,
+        };
+
         Ok(Self {
             bind,
             max_body_bytes,
             request_timeout,
             model_path,
             provider,
+            batch_size,
+            cuda,
         })
     }
 }
@@ -182,7 +218,11 @@ mod tests {
         KEY_BIND, KEY_MAX_BODY_BYTES, KEY_MODEL_PATH, KEY_PROVIDER, KEY_REQUEST_TIMEOUT_SECS,
         SECTION,
     };
-    use crate::phase2::ExecutionProviderKind;
+    use crate::inference_options::{
+        BatchSize, CudaTuning, DEFAULT_BATCH_SIZE, KEY_BATCH_SIZE, KEY_CUDA_CONV1D_PAD,
+        KEY_CUDA_GRAPH, KEY_CUDA_TF32, MAX_BATCH_SIZE,
+    };
+    use crate::phase2::{ExecutionProviderKind, InferenceOptions};
     use std::io::Write;
     use std::time::Duration;
     use tempfile::NamedTempFile;
@@ -362,6 +402,98 @@ provider=not-a-provider
         );
         let err = HttpConfig::load_from_path(ini.path()).expect_err("bad provider");
         assert!(matches!(err, HttpConfigError::Config(_)));
+    }
+
+    #[test]
+    fn inference_keys_default_when_unset() {
+        let ini = write_ini(
+            r#"[http]
+bind=0.0.0.0:8080
+provider=cuda
+"#,
+        );
+        let cfg = HttpConfig::load_from_path(ini.path()).expect("minimal ini");
+        assert_eq!(cfg.batch_size, BatchSize::default());
+        assert_eq!(cfg.batch_size.get(), DEFAULT_BATCH_SIZE);
+        assert!(cfg.cuda.is_unset());
+        assert_eq!(
+            cfg.inference_options(),
+            InferenceOptions {
+                provider: ExecutionProviderKind::Cuda,
+                batch_size: BatchSize::default(),
+                cuda: CudaTuning::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn inference_keys_are_applied_with_shared_key_names() {
+        let ini = write_ini(&format!(
+            "[http]\nbind=0.0.0.0:8080\nprovider=cpu\n{KEY_BATCH_SIZE}=64\n{KEY_CUDA_TF32}=off\n{KEY_CUDA_CONV1D_PAD}=ON\n{KEY_CUDA_GRAPH}= 1 \n"
+        ));
+        let cfg = HttpConfig::load_from_path(ini.path()).expect("tuned ini");
+        assert_eq!(cfg.batch_size.get(), 64);
+        assert_eq!(
+            cfg.cuda,
+            CudaTuning {
+                tf32: Some(false),
+                conv1d_pad_to_nc1d: Some(true),
+                cuda_graph: Some(true),
+            }
+        );
+        assert_eq!(
+            cfg.inference_options(),
+            InferenceOptions {
+                provider: ExecutionProviderKind::Cpu,
+                batch_size: BatchSize::new(64).unwrap(),
+                cuda: cfg.cuda,
+            }
+        );
+        // Existing keys keep their meaning alongside the new ones.
+        assert_eq!(cfg.bind, "0.0.0.0:8080");
+        assert_eq!(cfg.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(cfg.provider, ExecutionProviderKind::Cpu);
+    }
+
+    #[test]
+    fn batch_size_bounds_are_accepted() {
+        for n in [1, MAX_BATCH_SIZE] {
+            let ini = write_ini(&format!("[http]\nbind=0.0.0.0:8080\nbatch_size={n}\n"));
+            let cfg = HttpConfig::load_from_path(ini.path()).expect("bound batch_size");
+            assert_eq!(cfg.batch_size.get(), n);
+        }
+    }
+
+    #[test]
+    fn invalid_batch_size_is_config_error_naming_key_range_and_value() {
+        for raw in ["0", "257", "-1", "abc", "1.5", ""] {
+            let ini = write_ini(&format!("[http]\nbind=0.0.0.0:8080\nbatch_size={raw}\n"));
+            let err = HttpConfig::load_from_path(ini.path()).expect_err("bad batch_size");
+            let HttpConfigError::Config(msg) = err;
+            assert!(msg.contains("batch_size"), "raw={raw:?}: {msg}");
+            assert!(msg.contains("1..=256"), "raw={raw:?}: {msg}");
+            assert!(msg.contains(&format!("'{raw}'")), "raw={raw:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn invalid_cuda_switch_is_config_error_naming_key_values_and_input() {
+        for key in [KEY_CUDA_TF32, KEY_CUDA_CONV1D_PAD, KEY_CUDA_GRAPH] {
+            for raw in ["yes", "2", ""] {
+                let ini = write_ini(&format!("[http]\nbind=0.0.0.0:8080\n{key}={raw}\n"));
+                let err = HttpConfig::load_from_path(ini.path()).expect_err("bad switch");
+                let HttpConfigError::Config(msg) = err;
+                assert!(msg.contains(key), "key={key} raw={raw:?}: {msg}");
+                assert!(
+                    msg.contains("true|false|on|off|1|0"),
+                    "key={key} raw={raw:?}: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!("'{raw}'")),
+                    "key={key} raw={raw:?}: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
