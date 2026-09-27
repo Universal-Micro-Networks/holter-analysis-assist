@@ -86,6 +86,8 @@ impl ResponseCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perf::{AnalyzePerf, StageTimings};
+    use std::time::Duration;
 
     fn sample_row() -> BeatResultRow {
         BeatResultRow {
@@ -105,6 +107,7 @@ mod tests {
             unknown_ones: 0,
             short_run_ones: 0,
             windows: 2,
+            perf: AnalyzePerf::default(),
         }
     }
 
@@ -169,12 +172,45 @@ mod tests {
     }
 
     #[test]
+    fn json_summary_keys_exclude_perf_measurements() {
+        let mut summary = sample_summary();
+        summary.perf = AnalyzePerf {
+            timings: StageTimings {
+                model_load: Some(Duration::from_millis(5)),
+                total: Duration::from_millis(9),
+                ..StageTimings::default()
+            },
+            windows: 2,
+            effective: None,
+        };
+        let json = ResponseCodec::to_json(&[sample_row()], &summary).expect("json");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let mut keys: Vec<&str> = v["summary"]
+            .as_object()
+            .expect("summary object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["beats", "short_run_ones", "unknown_ones", "windows"],
+            "{json}"
+        );
+        assert!(
+            !json.contains("perf") && !json.contains("model_load"),
+            "{json}"
+        );
+    }
+
+    #[test]
     fn empty_rows_still_emit_csv_header_and_json_summary() {
         let summary = AnalyzeSummary {
             beats: 0,
             unknown_ones: 0,
             short_run_ones: 0,
             windows: 0,
+            perf: AnalyzePerf::default(),
         };
         let csv = ResponseCodec::to_csv(&[]).expect("empty csv");
         assert!(

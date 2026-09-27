@@ -1,20 +1,29 @@
 //! End-to-end ECL analysis pipeline (BeatSense `analyzer.py` Rust port).
 
 use crate::model_source::ModelSource;
-use crate::phase2::{ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
+use crate::perf::{AnalyzePerf, StageTimings};
+use crate::phase2::{
+    ExecutionProviderKind, InferenceOptions, Phase2Model, WindowOutputs, WINDOW_SAMPLES,
+};
 use crate::postprocess::{
     build_rhythm_intervals, build_unknown_intervals, center_best_beats, classify_event_sigmoid,
     cluster_candidates, complement_intervals, detect_run_candidates, extract_window_candidates,
-    finalize_runs_after_unknown, label_points_by_rhythm, point_in_intervals, RhythmWindow,
+    finalize_runs_after_unknown, label_points_by_rhythm, point_in_intervals, BeatCandidate,
+    RhythmWindow,
 };
 use crate::preprocess::{
-    build_ai_continuous_signal, materialize_window, parse_ecl_filename, read_ecl_adc_counts, FS,
+    build_ai_continuous_signal, materialize_window, parse_ecl_filename, read_ecl_adc_counts,
+    AiContinuousSignal, FS,
 };
 use chrono::{Duration, NaiveDateTime};
 use csv::WriterBuilder;
 use serde::Serialize;
 use std::path::Path;
+use std::time::Instant;
 use thiserror::Error;
+
+/// Receives each window's outputs with its job-wide window index, in window order.
+pub(crate) type WindowObserver<'a> = &'a mut dyn FnMut(usize, &WindowOutputs);
 
 #[derive(Debug, Error)]
 pub enum AnalyzeError {
@@ -50,6 +59,8 @@ pub struct AnalyzeSummary {
     pub unknown_ones: usize,
     pub short_run_ones: usize,
     pub windows: usize,
+    /// Stage timings and effective inference settings (diagnostics only; not in CSV / JSON).
+    pub perf: AnalyzePerf,
 }
 
 /// Path-only compatibility wrapper → [`ModelSource::Path`] → [`analyze_ecl_with_source`].
@@ -63,7 +74,7 @@ pub fn analyze_ecl(
         &ModelSource::Path(onnx_path.to_path_buf()),
         output_csv,
         None,
-        ExecutionProviderKind::Auto,
+        &InferenceOptions::from(ExecutionProviderKind::Auto),
     )
 }
 
@@ -80,11 +91,12 @@ pub fn analyze_ecl_with_limit(
         &ModelSource::Path(onnx_path.to_path_buf()),
         output_csv,
         max_windows,
-        provider,
+        &InferenceOptions::from(provider),
     )
 }
 
-/// Canonical ECL analysis entry: load the model via [`ModelSource`], then run the pipeline.
+/// Canonical ECL analysis entry: load the model via [`ModelSource`] with `options`
+/// (provider, batch size, CUDA tuning), then run the pipeline.
 ///
 /// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
 pub fn analyze_ecl_with_source(
@@ -92,15 +104,27 @@ pub fn analyze_ecl_with_source(
     model: &ModelSource,
     output_csv: &Path,
     max_windows: Option<usize>,
-    provider: ExecutionProviderKind,
+    options: &InferenceOptions,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    let job_start = Instant::now();
     ensure_inference_licensed()?;
     // Fail-fast on model source before reading the full ECL (Path missing / Embedded unavailable).
-    let mut model = Phase2Model::load_from_source(model, provider)?;
-    analyze_ecl_with_loaded_model(ecl_path, &mut model, output_csv, max_windows)
+    let load_start = Instant::now();
+    let mut model = Phase2Model::load_from_source_with(model, options)?;
+    let model_load = load_start.elapsed();
+    analyze_ecl_with_loaded_model(
+        ecl_path,
+        &mut model,
+        output_csv,
+        max_windows,
+        &mut |_, _| {},
+        job_start,
+        Some(model_load),
+    )
 }
 
 /// Run the ECL pipeline with an already-loaded [`Phase2Model`] (HTTP resident session).
+/// Batch size and tuning follow the model's effective settings.
 ///
 /// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
 pub fn analyze_ecl_with_model(
@@ -109,8 +133,30 @@ pub fn analyze_ecl_with_model(
     output_csv: &Path,
     max_windows: Option<usize>,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    analyze_ecl_with_model_observed(ecl_path, model, output_csv, max_windows, &mut |_, _| {})
+}
+
+/// [`analyze_ecl_with_model`] that also hands every window's outputs to `observer`.
+///
+/// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
+pub(crate) fn analyze_ecl_with_model_observed(
+    ecl_path: &Path,
+    model: &mut Phase2Model,
+    output_csv: &Path,
+    max_windows: Option<usize>,
+    observer: WindowObserver<'_>,
+) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    let job_start = Instant::now();
     ensure_inference_licensed()?;
-    analyze_ecl_with_loaded_model(ecl_path, model, output_csv, max_windows)
+    analyze_ecl_with_loaded_model(
+        ecl_path,
+        model,
+        output_csv,
+        max_windows,
+        observer,
+        job_start,
+        None,
+    )
 }
 
 fn ensure_inference_licensed() -> Result<(), AnalyzeError> {
@@ -127,12 +173,70 @@ fn ensure_inference_licensed() -> Result<(), AnalyzeError> {
     }
 }
 
+/// Candidates and rhythm windows of all inferred windows, in window order.
+struct WindowInference {
+    candidates: Vec<BeatCandidate>,
+    rhythm_windows: Vec<RhythmWindow>,
+}
+
+/// Infer `starts` in chunks of the model's effective batch size.
+///
+/// Window indices stay job-wide (not per chunk), so candidates and rhythm
+/// windows come out identical for every batch size.
+fn infer_windows(
+    model: &mut Phase2Model,
+    signal: &AiContinuousSignal,
+    starts: &[i64],
+    observer: WindowObserver<'_>,
+) -> Result<WindowInference, AnalyzeError> {
+    let batch = model.batch_size();
+    let mut candidates = Vec::new();
+    let mut rhythm_windows = Vec::with_capacity(starts.len());
+    let mut flat = Vec::with_capacity(batch * WINDOW_SAMPLES);
+
+    for (chunk_index, chunk) in starts.chunks(batch).enumerate() {
+        flat.clear();
+        for &start_abs in chunk {
+            flat.extend_from_slice(&materialize_window(
+                &signal.ecg_valid_500,
+                signal.abs_valid_start_500,
+                start_abs,
+            ));
+        }
+        let outputs = model.infer_batch(&flat, chunk.len())?;
+        for (offset, (&start_abs, out)) in chunk.iter().zip(&outputs).enumerate() {
+            let wi = chunk_index * batch + offset;
+            observer(wi, out);
+            candidates.extend(extract_window_candidates(
+                &out.beat, &out.event, start_abs, wi,
+            ));
+            rhythm_windows.push(RhythmWindow {
+                start_sample_500: start_abs,
+                end_sample_500: start_abs + WINDOW_SAMPLES as i64,
+                rhythm_score: out.rhythm,
+            });
+            if wi > 0 && wi % 200 == 0 {
+                eprintln!("      ... window {wi}/{}", starts.len());
+            }
+        }
+    }
+
+    Ok(WindowInference {
+        candidates,
+        rhythm_windows,
+    })
+}
+
 fn analyze_ecl_with_loaded_model(
     ecl_path: &Path,
     model: &mut Phase2Model,
     output_csv: &Path,
     max_windows: Option<usize>,
+    observer: WindowObserver<'_>,
+    job_start: Instant,
+    model_load: Option<std::time::Duration>,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
+    let preprocess_start = Instant::now();
     let source_info = parse_ecl_filename(ecl_path)?;
     let ecl_name = ecl_path
         .file_name()
@@ -142,6 +246,7 @@ fn analyze_ecl_with_loaded_model(
     let ecg_all_250 = read_ecl_adc_counts(ecl_path)?;
     eprintln!("[1/6] AI preprocessing ...");
     let signal = build_ai_continuous_signal(&ecg_all_250, &source_info)?;
+    let preprocess = preprocess_start.elapsed();
 
     let mut starts = signal.starts_abs_500.clone();
     if let Some(limit) = max_windows {
@@ -166,27 +271,15 @@ fn analyze_ecl_with_loaded_model(
         model.provider(),
         model.model_path().display()
     );
-    let mut all_candidates = Vec::new();
-    let mut rhythm_windows = Vec::new();
-
-    for (wi, &start_abs) in starts.iter().enumerate() {
-        let window =
-            materialize_window(&signal.ecg_valid_500, signal.abs_valid_start_500, start_abs);
-        let out = model.infer_window(&window)?;
-        all_candidates.extend(extract_window_candidates(
-            &out.beat, &out.event, start_abs, wi,
-        ));
-        rhythm_windows.push(RhythmWindow {
-            start_sample_500: start_abs,
-            end_sample_500: start_abs + WINDOW_SAMPLES as i64,
-            rhythm_score: out.rhythm,
-        });
-        if wi > 0 && wi % 200 == 0 {
-            eprintln!("      ... window {wi}/{}", starts.len());
-        }
-    }
+    let inference_start = Instant::now();
+    let WindowInference {
+        candidates: all_candidates,
+        rhythm_windows,
+    } = infer_windows(model, &signal, &starts, observer)?;
+    let inference = inference_start.elapsed();
 
     eprintln!("[3/6] Beat / event / rhythm post-processing ...");
+    let postprocess_start = Instant::now();
     let beats = center_best_beats(cluster_candidates(all_candidates));
     let (rhythm_intervals, coverage_intervals) = build_rhythm_intervals(rhythm_windows);
     let beat_positions: Vec<i64> = beats.iter().map(|b| b.sample_in_file_500).collect();
@@ -254,8 +347,10 @@ fn analyze_ecl_with_loaded_model(
         .zip(unknown.iter())
         .map(|(s, u)| if *u == 1 { 0 } else { *s })
         .collect();
+    let postprocess = postprocess_start.elapsed();
 
     eprintln!("[6/6] Final CSV ...");
+    let output_start = Instant::now();
     let record_id = ecl_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -306,11 +401,25 @@ fn analyze_ecl_with_loaded_model(
         }
     }
 
+    let output = output_start.elapsed();
+
     let summary = AnalyzeSummary {
         beats: rows.len(),
         unknown_ones: rows.iter().filter(|r| r.unknown == 1).count(),
         short_run_ones: rows.iter().filter(|r| r.short_run_flag == 1).count(),
         windows: starts.len(),
+        perf: AnalyzePerf {
+            timings: StageTimings {
+                model_load,
+                preprocess,
+                inference,
+                postprocess,
+                output,
+                total: job_start.elapsed(),
+            },
+            windows: starts.len(),
+            effective: Some(model.effective().clone()),
+        },
     };
     Ok((rows, summary))
 }
@@ -327,6 +436,7 @@ fn format_beat_time(t: NaiveDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference_options::{BatchSize, CudaTuning};
     use crate::license::{
         LicenseCheckResult, LicenseClient, LicenseError, LicenseGate, LicenseMeterResult,
         MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
@@ -336,6 +446,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     /// Valid filename shape so preprocess filename parse succeeds; file need not exist
@@ -406,7 +517,7 @@ mod tests {
                 &source,
                 &csv,
                 Some(0),
-                ExecutionProviderKind::Cpu,
+                &InferenceOptions::from(ExecutionProviderKind::Cpu),
             )
             .expect_err("missing model path must fail");
             match err {
@@ -454,7 +565,7 @@ mod tests {
                 &ModelSource::Embedded,
                 &csv,
                 Some(0),
-                ExecutionProviderKind::Cpu,
+                &InferenceOptions::from(ExecutionProviderKind::Cpu),
             )
             .expect_err("Embedded without feature must fail");
             let msg = err.to_string();
@@ -491,7 +602,7 @@ mod tests {
                 &source,
                 &csv,
                 Some(1),
-                ExecutionProviderKind::Cpu,
+                &InferenceOptions::from(ExecutionProviderKind::Cpu),
             )
             .expect("path source analyze with 1 window");
             assert_eq!(summary.windows, 1);
@@ -523,7 +634,7 @@ mod tests {
                 &ModelSource::Embedded,
                 &csv,
                 Some(1),
-                ExecutionProviderKind::Cpu,
+                &InferenceOptions::from(ExecutionProviderKind::Cpu),
             )
             .expect("embedded source analyze without external model path");
             assert_eq!(summary.windows, 1);
@@ -544,7 +655,7 @@ mod tests {
                 &ModelSource::Path(missing),
                 &csv,
                 Some(0),
-                ExecutionProviderKind::Cpu,
+                &InferenceOptions::from(ExecutionProviderKind::Cpu),
             )
             .expect_err("uninstalled gate must fail-closed");
             let msg = err.to_string();
@@ -578,7 +689,7 @@ mod tests {
                 &ModelSource::Path(missing),
                 &csv,
                 Some(2),
-                ExecutionProviderKind::Cpu,
+                &InferenceOptions::from(ExecutionProviderKind::Cpu),
             )
             .expect_err("meter deny must reject inference");
             let msg = err.to_string();
@@ -614,7 +725,7 @@ mod tests {
                     &ModelSource::Path(missing),
                     &csv,
                     Some(3),
-                    ExecutionProviderKind::Cpu,
+                    &InferenceOptions::from(ExecutionProviderKind::Cpu),
                 );
                 assert_eq!(
                     meter_calls.load(Ordering::SeqCst),
@@ -630,7 +741,7 @@ mod tests {
                 &ModelSource::Path(onnx.to_path_buf()),
                 &csv,
                 Some(2),
-                ExecutionProviderKind::Cpu,
+                &InferenceOptions::from(ExecutionProviderKind::Cpu),
             )
             .expect("meter success should allow analyze");
             assert_eq!(summary.windows, 2, "exercise multiple windows");
@@ -685,6 +796,337 @@ mod tests {
                 2,
                 "each job meters once; wrappers must not double within a job"
             );
+        });
+    }
+
+    // --- Batched inference loop, stage timings, observed entry (inference-acceleration 3.1) ---
+
+    fn tiny_dynamic_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("phase2_tiny_dynamic.onnx")
+    }
+
+    fn cpu_options(batch: usize) -> InferenceOptions {
+        InferenceOptions {
+            provider: ExecutionProviderKind::Cpu,
+            batch_size: BatchSize::new(batch).expect("valid batch size"),
+            cuda: CudaTuning::default(),
+        }
+    }
+
+    fn load_tiny(batch: usize) -> Phase2Model {
+        let model = Phase2Model::load_with_options(tiny_dynamic_fixture(), &cpu_options(batch))
+            .expect("load tiny dynamic fixture on CPU");
+        assert_eq!(model.batch_size(), batch);
+        model
+    }
+
+    /// Spiky QRS-like pulses on a slow baseline so the tiny model yields beat peaks.
+    fn synthetic_signal(windows: usize, abs_valid_start_500: i64) -> AiContinuousSignal {
+        let len = WINDOW_SAMPLES + (windows - 1) * crate::preprocess::STEP_SAMPLES;
+        let ecg_valid_500: Vec<f32> = (0..len)
+            .map(|i| {
+                let t = i as f32;
+                let phase = (i % 397) as f32 - 198.0;
+                let pulse = 6.0 * (-(phase * phase) / 18.0).exp();
+                pulse + 0.3 * (t * 0.0021).sin() + 0.05 * (t * 0.37).cos()
+            })
+            .collect();
+        let starts_abs_500 = (0..windows)
+            .map(|k| abs_valid_start_500 + (k * crate::preprocess::STEP_SAMPLES) as i64)
+            .collect();
+        AiContinuousSignal {
+            abs_valid_end_500: abs_valid_start_500 + len as i64,
+            ecg_valid_500,
+            starts_abs_500,
+            abs_valid_start_500,
+        }
+    }
+
+    type CandidateKey = (i64, usize, usize, u32, u32, u32, u32, u32);
+
+    fn candidate_keys(candidates: &[crate::postprocess::BeatCandidate]) -> Vec<CandidateKey> {
+        candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.abs_pos,
+                    c.local_pos,
+                    c.window_index,
+                    c.beat_score.to_bits(),
+                    c.center_distance.to_bits(),
+                    c.pac_score.to_bits(),
+                    c.pvc_score.to_bits(),
+                    c.n_score.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    fn rhythm_keys(windows: &[RhythmWindow]) -> Vec<(i64, i64, u32)> {
+        windows
+            .iter()
+            .map(|w| {
+                (
+                    w.start_sample_500,
+                    w.end_sample_500,
+                    w.rhythm_score.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn infer_windows_batch_1_and_16_give_identical_candidates_and_rhythm_windows() {
+        let total = 37;
+        let signal = synthetic_signal(total, 1_234);
+        let run = |batch: usize| {
+            let mut model = load_tiny(batch);
+            let mut seen = Vec::new();
+            let result = infer_windows(
+                &mut model,
+                &signal,
+                &signal.starts_abs_500,
+                &mut |wi: usize, out: &WindowOutputs| {
+                    assert_eq!(out.beat.len(), WINDOW_SAMPLES);
+                    seen.push(wi);
+                },
+            )
+            .expect("infer_windows");
+            (result, seen)
+        };
+
+        let (one, seen_one) = run(1);
+        let (sixteen, seen_sixteen) = run(16);
+
+        let expected_order: Vec<usize> = (0..total).collect();
+        assert_eq!(seen_one, expected_order, "batch 1 observer order");
+        assert_eq!(seen_sixteen, expected_order, "batch 16 observer order");
+
+        assert_eq!(one.rhythm_windows.len(), total);
+        assert_eq!(sixteen.rhythm_windows.len(), total, "tail chunk kept");
+        assert!(
+            !one.candidates.is_empty(),
+            "synthetic signal must produce beat candidates"
+        );
+        let windows_with_candidates: std::collections::BTreeSet<usize> =
+            one.candidates.iter().map(|c| c.window_index).collect();
+        assert!(
+            windows_with_candidates.contains(&(total - 1)),
+            "last (tail) window must contribute candidates"
+        );
+
+        assert_eq!(
+            candidate_keys(&one.candidates),
+            candidate_keys(&sixteen.candidates),
+            "candidates must not depend on batch size"
+        );
+        assert_eq!(
+            rhythm_keys(&one.rhythm_windows),
+            rhythm_keys(&sixteen.rhythm_windows),
+            "rhythm windows must not depend on batch size"
+        );
+        for (k, w) in sixteen.rhythm_windows.iter().enumerate() {
+            assert_eq!(w.start_sample_500, signal.starts_abs_500[k]);
+            assert_eq!(w.end_sample_500, w.start_sample_500 + WINDOW_SAMPLES as i64);
+        }
+    }
+
+    #[test]
+    fn infer_windows_matches_per_window_inference() {
+        let total = 5;
+        let signal = synthetic_signal(total, 0);
+        let mut reference_model = load_tiny(1);
+        let mut model = load_tiny(4);
+        let mut observed = Vec::new();
+        infer_windows(
+            &mut model,
+            &signal,
+            &signal.starts_abs_500,
+            &mut |wi: usize, out: &WindowOutputs| observed.push((wi, out.clone())),
+        )
+        .expect("infer_windows");
+        assert_eq!(observed.len(), total);
+        for (k, (wi, out)) in observed.iter().enumerate() {
+            assert_eq!(*wi, k);
+            let window = materialize_window(
+                &signal.ecg_valid_500,
+                signal.abs_valid_start_500,
+                signal.starts_abs_500[k],
+            );
+            let want = reference_model.infer_window(&window).expect("infer_window");
+            assert_eq!(out.beat, want.beat, "window {k}: beat");
+            assert_eq!(out.event, want.event, "window {k}: event");
+            assert_eq!(out.rhythm, want.rhythm, "window {k}: rhythm");
+        }
+    }
+
+    /// 11-minute recording → 38 windows (chunks 16, 16, 6 at batch 16).
+    const SYNTH_ECL_NAME: &str = "1234567890_20250101_0000_0011.ecl";
+    const SYNTH_ECL_WINDOWS: usize = 38;
+
+    /// 24 h ECL (minimum accepted size) with QRS-like pulses at 250 Hz.
+    fn write_synthetic_ecl(dir: &Path) -> PathBuf {
+        let n = crate::preprocess::EXPECTED_24H_SAMPLES_250;
+        let mut bytes = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let phase = (i % 199) as f32 - 99.0;
+            let value = 400.0 * (-(phase * phase) / 4.0).exp() + 20.0 * (i as f32 * 0.004).sin();
+            let raw12 = (0x0800 + value.round() as i32).clamp(0, 0x0FFF) as u16;
+            let word = ((raw12 & 0x0F00) << 4) | (raw12 & 0x00FF);
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let path = dir.join(SYNTH_ECL_NAME);
+        std::fs::write(&path, bytes).expect("write synthetic ECL");
+        path
+    }
+
+    fn row_keys(rows: &[BeatResultRow]) -> Vec<String> {
+        rows.iter()
+            .map(|r| {
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}",
+                    r.record_id,
+                    r.beat_idx,
+                    r.beat_time,
+                    r.unknown,
+                    r.beat_class,
+                    r.rhythm_class,
+                    r.short_run_flag
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn observed_entry_reports_all_windows_perf_and_same_rows_for_batch_1_and_16() {
+        with_clean_global(|| {
+            let meter_calls = Arc::new(AtomicUsize::new(0));
+            LicenseGate::install(LicenseGate::new(CountingMeterClient::allow(Arc::clone(
+                &meter_calls,
+            ))))
+            .expect("install counting gate");
+
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let run = |batch: usize| {
+                let mut model = load_tiny(batch);
+                let csv = dir.path().join(format!("out_{batch}.csv"));
+                let mut seen = Vec::new();
+                let (rows, summary) = analyze_ecl_with_model_observed(
+                    &ecl,
+                    &mut model,
+                    &csv,
+                    None,
+                    &mut |wi: usize, _out: &WindowOutputs| seen.push(wi),
+                )
+                .expect("observed analyze");
+                assert!(csv.exists());
+                (rows, summary, seen, std::fs::read(&csv).expect("read csv"))
+            };
+
+            let (rows_one, summary_one, seen_one, csv_one) = run(1);
+            let (rows_sixteen, summary_sixteen, seen_sixteen, csv_sixteen) = run(16);
+            assert_eq!(meter_calls.load(Ordering::SeqCst), 2, "one meter per job");
+
+            let expected_order: Vec<usize> = (0..SYNTH_ECL_WINDOWS).collect();
+            assert_eq!(seen_one, expected_order);
+            assert_eq!(seen_sixteen, expected_order);
+            assert_eq!(summary_one.windows, SYNTH_ECL_WINDOWS);
+            assert_eq!(summary_sixteen.windows, SYNTH_ECL_WINDOWS);
+            assert!(!rows_one.is_empty(), "synthetic ECL must yield beats");
+            assert_eq!(row_keys(&rows_one), row_keys(&rows_sixteen));
+            assert_eq!(csv_one, csv_sixteen, "CSV bytes must not depend on batch");
+            assert_eq!(summary_one.beats, summary_sixteen.beats);
+            assert_eq!(summary_one.unknown_ones, summary_sixteen.unknown_ones);
+            assert_eq!(summary_one.short_run_ones, summary_sixteen.short_run_ones);
+
+            for (batch, summary) in [(1, &summary_one), (16, &summary_sixteen)] {
+                let perf = &summary.perf;
+                assert_eq!(perf.windows, SYNTH_ECL_WINDOWS, "batch {batch}");
+                let eff = perf.effective.as_ref().expect("effective settings");
+                assert_eq!(eff.batch_size, batch);
+                assert_eq!(eff.provider, ExecutionProviderKind::Cpu);
+                let t = &perf.timings;
+                assert!(t.model_load.is_none(), "caller-loaded model: no model_load");
+                assert!(t.preprocess > Duration::ZERO, "batch {batch}: {t:?}");
+                assert!(t.inference > Duration::ZERO, "batch {batch}: {t:?}");
+                assert!(t.output > Duration::ZERO, "batch {batch}: {t:?}");
+                let stages = t.preprocess + t.inference + t.postprocess + t.output;
+                assert!(t.total >= stages, "total covers all stages: {t:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn canonical_entry_records_model_load_and_effective_batch() {
+        with_clean_global(|| {
+            install_allow_gate();
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let csv = dir.path().join("out.csv");
+            let (rows, summary) = analyze_ecl_with_source(
+                &ecl,
+                &ModelSource::Path(tiny_dynamic_fixture()),
+                &csv,
+                Some(20),
+                &cpu_options(16),
+            )
+            .expect("canonical analyze with tiny fixture");
+            assert_eq!(summary.windows, 20);
+            assert_eq!(rows.len(), summary.beats);
+            let perf = &summary.perf;
+            assert_eq!(perf.windows, 20);
+            assert_eq!(perf.effective.as_ref().map(|e| e.batch_size), Some(16));
+            let t = &perf.timings;
+            let model_load = t.model_load.expect("canonical entry loads the model");
+            let stages = model_load + t.preprocess + t.inference + t.postprocess + t.output;
+            assert!(t.total >= stages, "total covers model load too: {t:?}");
+        });
+    }
+
+    #[test]
+    fn observed_entry_uninstalled_gate_fail_closed_without_windows_or_output() {
+        with_clean_global(|| {
+            let (_dir, csv) = temp_csv();
+            let mut model = load_tiny(4);
+            let mut calls = 0usize;
+            let err = analyze_ecl_with_model_observed(
+                &stub_ecl_path(),
+                &mut model,
+                &csv,
+                Some(3),
+                &mut |_wi: usize, _out: &WindowOutputs| calls += 1,
+            )
+            .expect_err("uninstalled gate must fail-closed");
+            assert!(
+                matches!(err, AnalyzeError::License(LicenseError::InferenceDenied(_))),
+                "expected License(InferenceDenied), got {err:?}"
+            );
+            assert_eq!(calls, 0, "no window may be observed without license");
+            assert!(!csv.exists());
+        });
+    }
+
+    #[test]
+    fn analyze_ecl_with_model_meters_once_per_job() {
+        with_clean_global(|| {
+            let meter_calls = Arc::new(AtomicUsize::new(0));
+            LicenseGate::install(LicenseGate::new(CountingMeterClient::allow(Arc::clone(
+                &meter_calls,
+            ))))
+            .expect("install counting gate");
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let csv = dir.path().join("out.csv");
+            let mut model = load_tiny(16);
+            let (_rows, summary) =
+                analyze_ecl_with_model(&ecl, &mut model, &csv, Some(17)).expect("analyze");
+            assert_eq!(summary.windows, 17);
+            assert!(summary.perf.timings.model_load.is_none());
+            assert_eq!(meter_calls.load(Ordering::SeqCst), 1);
         });
     }
 }

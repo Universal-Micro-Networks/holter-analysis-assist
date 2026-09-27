@@ -7,7 +7,7 @@ use crate::analyze::{analyze_ecl_with_model, analyze_ecl_with_source, AnalyzeErr
 use crate::http::error::HttpError;
 use crate::http::response::ResponseCodec;
 use crate::http::state::{AppState, SharedModel};
-use crate::phase2::ExecutionProviderKind;
+use crate::phase2::{ExecutionProviderKind, InferenceOptions};
 use crate::preprocess::parse_ecl_filename;
 use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -148,14 +148,24 @@ fn run_analyze(
                     guard.provider()
                 );
                 drop(guard);
-                analyze_ecl_with_source(ecl_path, model_source, out_csv, max_windows, provider)
+                analyze_ecl_with_source(
+                    ecl_path,
+                    model_source,
+                    out_csv,
+                    max_windows,
+                    &InferenceOptions::from(provider),
+                )
             } else {
                 analyze_ecl_with_model(ecl_path, &mut guard, out_csv, max_windows)
             }
         }
-        SharedModel::Ephemeral(source) => {
-            analyze_ecl_with_source(ecl_path, source, out_csv, max_windows, provider)
-        }
+        SharedModel::Ephemeral(source) => analyze_ecl_with_source(
+            ecl_path,
+            source,
+            out_csv,
+            max_windows,
+            &InferenceOptions::from(provider),
+        ),
     }
 }
 

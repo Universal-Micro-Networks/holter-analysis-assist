@@ -3,7 +3,9 @@ use holter_analysis_assist::analyze::analyze_ecl_with_source;
 use holter_analysis_assist::license::{
     LicenseConfig, LicenseError, LicenseGate, ReqwestLicenseClient,
 };
-use holter_analysis_assist::phase2::{self, ExecutionProviderKind, Phase2Model, WINDOW_SAMPLES};
+use holter_analysis_assist::phase2::{
+    self, ExecutionProviderKind, InferenceOptions, Phase2Model, WINDOW_SAMPLES,
+};
 use holter_analysis_assist::{classify_ecg, ClassificationResult, ModelSource};
 use serde::Serialize;
 use std::fs;
@@ -240,7 +242,8 @@ fn main() -> ExitCode {
             provider,
         } => {
             let source = resolve_model_source(model);
-            match analyze_ecl_with_source(&ecl, &source, &output, max_windows, provider.into()) {
+            let options = InferenceOptions::from(ExecutionProviderKind::from(provider));
+            match analyze_ecl_with_source(&ecl, &source, &output, max_windows, &options) {
                 Ok((_rows, summary)) => {
                     println!("saved: {}", output.display());
                     println!("beats: {}", summary.beats);
