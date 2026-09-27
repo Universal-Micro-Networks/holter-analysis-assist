@@ -2,6 +2,13 @@
 
 作成: 2026-09-27 / 作成環境: macOS（GPU なし）
 
+> **更新（2026-09-28, Windows）**: 全タスク（2.3〜4.2）を Windows で実装・レビュー・コミット済み（`tasks.md` は全件 `[x]`、最終コミット `54cda46`）。以下の 1〜6 章は Mac から引き継いだ時点の記録で、6 章の申し送りはすべて反映済み。残りは 7 章「全タスク完了後」の GPU 実機での手動確認で、手順は `docs/perf/windows-gpu-benchmark.md` にある。
+>
+> Windows で踏んだ注意点:
+> - Smart App Control（SAC）が、新しくビルドした署名なしのテスト exe をブロックすることがある（os error 4551）。`--release` で実行し、それでもブロックされる場合は `--config "profile.release.package.holter-analysis-assist.opt-level=2"` などでプロファイルを変えてビルドし直すと通る。
+> - `tests/packaging_*` は bash が必要。`C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin` を PATH の先頭に追加して実行する。
+> - `tests/http_api_listen.rs` は、空きポートの取得とライセンス用モックサーバーの起動の間で競合し、まれに失敗する（以前からの問題）。再実行すると通る。
+
 ## 1. 現在地
 
 `/kiro-impl inference-acceleration` を自律モード（タスクごとに実装 → 独立レビュー → 検証 → `tasks.md` に `[x]` → コミット）で進めている途中です。
