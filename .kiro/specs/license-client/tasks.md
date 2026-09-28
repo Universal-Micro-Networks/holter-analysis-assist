@@ -134,7 +134,7 @@
   - _Depends: 6.1_
   - _Requirements: 5.1, 5.2, 6.1, 6.2, 6.3, 9.2, 9.3_
 
-- [ ] 7.3 (P) HTTP API のライセンス起因エラーを再試行可否で振り分ける
+- [x] 7.3 (P) HTTP API のライセンス起因エラーを再試行可否で振り分ける
   - 永続的な拒否は既存どおり 403 `license_inference_denied`、要求過多は 429 `license_rate_limited`、一時障害は 503 `license_temporarily_unavailable` にする
   - メッセージ先頭に理由コードを付け、公開メッセージ整形でライセンスキー（`license_key=` と `lk_` で始まる語）もマスクする
   - 変更とテストは HTTP エラー変換のファイル内に閉じる（7.2 のハンドラテストと衝突させない）
