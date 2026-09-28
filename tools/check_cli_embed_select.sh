@@ -118,7 +118,7 @@ PY
   [[ -s "$MOCK_PORT_FILE" ]] || fail "mock license server did not publish port; pid=$MOCK_PID log=$(cat "$mock_log" 2>/dev/null || true) dir=$(ls -la "$LICENSE_TMP" 2>/dev/null || true)"
   local port
   port="$(cat "$MOCK_PORT_FILE")"
-  printf '[license]\nserver_url=http://127.0.0.1:%s\ntimeout_secs=5\n' "$port" >"$LICENSE_INI"
+  printf '[license]\nserver_url=http://127.0.0.1:%s\nlicense_key=lk_0123456789abcdef0123456789abcdef\ntimeout_secs=5\n' "$port" >"$LICENSE_INI"
   echo "Mock license server on http://127.0.0.1:${port} (pid=$MOCK_PID)"
 }
 

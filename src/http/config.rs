@@ -506,6 +506,7 @@ bind=0.0.0.0:8080
 
 [license]
 server_url=https://license.example.com
+license_key=lk_0123456789abcdef0123456789abcdef
 "#,
         );
         let http = HttpConfig::load_from_path(ini.path()).expect("http section");
@@ -513,7 +514,7 @@ server_url=https://license.example.com
 
         let license = crate::license::LicenseConfig::load_from_path(ini.path())
             .expect("upstream license keys unchanged");
-        assert_eq!(license.server_url, "https://license.example.com");
+        assert_eq!(license.server_url, "https://license.example.com/");
     }
 
     #[test]

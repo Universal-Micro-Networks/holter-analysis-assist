@@ -10,14 +10,12 @@ use std::time::Duration;
 
 const SECTION: &str = "license";
 const KEY_SERVER_URL: &str = "server_url";
-const KEY_API_KEY: &str = "api_key";
+const KEY_LICENSE_KEY: &str = "license_key";
 const KEY_TIMEOUT_SECS: &str = "timeout_secs";
-const KEY_CHECK_PATH: &str = "check_path";
-const KEY_METER_PATH: &str = "meter_path";
+const RETIRED_KEY_API_KEY: &str = "api_key";
+const RETIRED_ENDPOINT_KEYS: [&str; 2] = ["check_path", "meter_path"];
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_CHECK_PATH: &str = "/v1/license/check";
-const DEFAULT_METER_PATH: &str = "/v1/license/meter";
 
 /// Opaque string that never prints its plaintext in [`Debug`].
 #[derive(Clone, PartialEq, Eq)]
@@ -44,21 +42,18 @@ impl fmt::Debug for SecretString {
 /// Validated license-server connection settings from a `[license]` ini section.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LicenseConfig {
+    /// Base URL, normalized to end with exactly one `/`.
     pub server_url: String,
-    pub api_key: Option<SecretString>,
+    pub license_key: SecretString,
     pub timeout: Duration,
-    pub check_path: String,
-    pub meter_path: String,
 }
 
 impl fmt::Debug for LicenseConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LicenseConfig")
             .field("server_url", &self.server_url)
-            .field("api_key", &self.api_key)
+            .field("license_key", &self.license_key)
             .field("timeout", &self.timeout)
-            .field("check_path", &self.check_path)
-            .field("meter_path", &self.meter_path)
             .finish()
     }
 }
@@ -76,8 +71,8 @@ pub(crate) fn verbatim_ini_option() -> ini::ParseOption {
 impl LicenseConfig {
     /// Load and validate `[license]` settings from `path`.
     ///
-    /// Fail-closed: missing file, missing section/keys, invalid URL, or non-positive
-    /// timeout yield [`LicenseError::Config`].
+    /// Fail-closed: missing file, missing section/keys, invalid URL, non-positive
+    /// timeout, or retired keys yield [`LicenseError::Config`].
     pub fn load_from_path(path: &Path) -> Result<Self, LicenseError> {
         let ini = ini::Ini::load_from_file_opt(path, verbatim_ini_option()).map_err(|e| {
             LicenseError::Config(format!(
@@ -90,6 +85,25 @@ impl LicenseConfig {
             LicenseError::Config(format!("missing [{SECTION}] section in {}", path.display()))
         })?;
 
+        let (config, warning) = Self::from_section(section)?;
+        if let Some(warning) = warning {
+            eprintln!("license: warning: {warning}");
+        }
+        Ok(config)
+    }
+
+    /// Validate a `[license]` section; the optional string is a non-fatal warning
+    /// (never contains key values).
+    fn from_section(section: &ini::Properties) -> Result<(Self, Option<String>), LicenseError> {
+        for key in RETIRED_ENDPOINT_KEYS {
+            if section.contains_key(key) {
+                return Err(config_err(format!(
+                    "'{key}' in [{SECTION}] is no longer supported: license endpoints are fixed \
+                     by the server contract; remove '{key}' (use '{KEY_SERVER_URL}' for a path prefix)"
+                )));
+            }
+        }
+
         let server_url_raw = section.get(KEY_SERVER_URL).ok_or_else(|| {
             LicenseError::Config(format!(
                 "missing required key '{KEY_SERVER_URL}' in [{SECTION}]"
@@ -97,34 +111,46 @@ impl LicenseConfig {
         })?;
         let server_url = validate_server_url(server_url_raw)?;
 
-        let api_key = match section.get(KEY_API_KEY) {
-            Some(v) if !v.trim().is_empty() => Some(SecretString::new(v.trim())),
-            _ => None,
+        let has_api_key = section.contains_key(RETIRED_KEY_API_KEY);
+        let license_key = match section.get(KEY_LICENSE_KEY) {
+            Some(v) if !v.trim().is_empty() => SecretString::new(v.trim()),
+            Some(_) => {
+                return Err(config_err(format!(
+                    "'{KEY_LICENSE_KEY}' in [{SECTION}] is empty; set the issued license key"
+                )));
+            }
+            None if has_api_key => {
+                return Err(config_err(format!(
+                    "'{RETIRED_KEY_API_KEY}' in [{SECTION}] is no longer supported; \
+                     rename '{RETIRED_KEY_API_KEY}' to '{KEY_LICENSE_KEY}'"
+                )));
+            }
+            None => {
+                return Err(config_err(format!(
+                    "missing required key '{KEY_LICENSE_KEY}' in [{SECTION}]; set the issued license key"
+                )));
+            }
         };
+        let warning = has_api_key.then(|| {
+            format!(
+                "'{RETIRED_KEY_API_KEY}' in [{SECTION}] is ignored because '{KEY_LICENSE_KEY}' \
+                 is set; remove '{RETIRED_KEY_API_KEY}'"
+            )
+        });
 
         let timeout = match section.get(KEY_TIMEOUT_SECS) {
             Some(raw) => parse_timeout_secs(raw)?,
             None => Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         };
 
-        let check_path = optional_path(
-            section.get(KEY_CHECK_PATH),
-            DEFAULT_CHECK_PATH,
-            KEY_CHECK_PATH,
-        )?;
-        let meter_path = optional_path(
-            section.get(KEY_METER_PATH),
-            DEFAULT_METER_PATH,
-            KEY_METER_PATH,
-        )?;
-
-        Ok(Self {
-            server_url,
-            api_key,
-            timeout,
-            check_path,
-            meter_path,
-        })
+        Ok((
+            Self {
+                server_url,
+                license_key,
+                timeout,
+            },
+            warning,
+        ))
     }
 }
 
@@ -158,7 +184,7 @@ fn validate_server_url(raw: &str) -> Result<String, LicenseError> {
         )));
     }
 
-    Ok(trimmed.to_string())
+    Ok(format!("{}/", trimmed.trim_end_matches('/')))
 }
 
 fn parse_timeout_secs(raw: &str) -> Result<Duration, LicenseError> {
@@ -176,31 +202,18 @@ fn parse_timeout_secs(raw: &str) -> Result<Duration, LicenseError> {
     Ok(Duration::from_secs(secs))
 }
 
-fn optional_path(raw: Option<&str>, default: &str, key: &str) -> Result<String, LicenseError> {
-    match raw {
-        None => Ok(default.to_string()),
-        Some(v) => {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                return Err(config_err(format!(
-                    "invalid '{key}': value must not be empty when set"
-                )));
-            }
-            Ok(trimmed.to_string())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        LicenseConfig, SecretString, DEFAULT_CHECK_PATH, DEFAULT_METER_PATH, DEFAULT_TIMEOUT_SECS,
-        KEY_API_KEY, KEY_CHECK_PATH, KEY_METER_PATH, KEY_SERVER_URL, KEY_TIMEOUT_SECS, SECTION,
+        verbatim_ini_option, LicenseConfig, SecretString, DEFAULT_TIMEOUT_SECS, KEY_LICENSE_KEY,
+        KEY_SERVER_URL, KEY_TIMEOUT_SECS, SECTION,
     };
     use crate::license::LicenseError;
     use std::io::Write;
     use std::time::Duration;
     use tempfile::NamedTempFile;
+
+    const KEY: &str = "lk_0123456789abcdef0123456789abcdef";
 
     fn write_ini(body: &str) -> NamedTempFile {
         let mut f = NamedTempFile::new().expect("temp ini");
@@ -208,90 +221,231 @@ mod tests {
         f
     }
 
+    fn load(body: &str) -> Result<LicenseConfig, LicenseError> {
+        let ini = write_ini(body);
+        LicenseConfig::load_from_path(ini.path())
+    }
+
+    fn config_err_message(body: &str) -> String {
+        match load(body) {
+            Err(LicenseError::Config(msg)) => msg,
+            other => panic!("expected LicenseError::Config, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn loads_required_server_url_and_optional_keys_with_defaults() {
-        let ini = write_ini(
-            r#"[license]
-server_url=https://license.example.com
-"#,
-        );
-        let cfg = LicenseConfig::load_from_path(ini.path()).expect("valid minimal ini");
-        assert_eq!(cfg.server_url, "https://license.example.com");
-        assert!(cfg.api_key.is_none());
+    fn loads_required_keys_with_default_timeout() {
+        let cfg = load(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={KEY}\n"
+        ))
+        .expect("valid minimal ini");
+        assert_eq!(cfg.server_url, "https://license.example.com/");
+        assert_eq!(cfg.license_key.expose_secret(), KEY);
         assert_eq!(cfg.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
-        assert_eq!(cfg.check_path, DEFAULT_CHECK_PATH);
-        assert_eq!(cfg.meter_path, DEFAULT_METER_PATH);
+        assert_eq!(DEFAULT_TIMEOUT_SECS, 10);
     }
 
     #[test]
-    fn loads_optional_auth_timeout_and_paths_with_same_key_names() {
-        // Key names are OS-agnostic string literals (Win/Linux identical).
-        assert_eq!(KEY_SERVER_URL, "server_url");
-        assert_eq!(KEY_API_KEY, "api_key");
-        assert_eq!(KEY_TIMEOUT_SECS, "timeout_secs");
-        assert_eq!(KEY_CHECK_PATH, "check_path");
-        assert_eq!(KEY_METER_PATH, "meter_path");
+    fn key_names_are_os_agnostic_literals() {
         assert_eq!(SECTION, "license");
-
-        let ini = write_ini(
-            r#"[license]
-server_url=http://127.0.0.1:9000
-api_key=super-secret-token
-timeout_secs=30
-check_path=/custom/check
-meter_path=/custom/meter
-"#,
-        );
-        let cfg = LicenseConfig::load_from_path(ini.path()).expect("full ini");
-        assert_eq!(cfg.server_url, "http://127.0.0.1:9000");
-        assert_eq!(
-            cfg.api_key.as_ref().map(SecretString::expose_secret),
-            Some("super-secret-token")
-        );
-        assert_eq!(cfg.timeout, Duration::from_secs(30));
-        assert_eq!(cfg.check_path, "/custom/check");
-        assert_eq!(cfg.meter_path, "/custom/meter");
+        assert_eq!(KEY_SERVER_URL, "server_url");
+        assert_eq!(KEY_LICENSE_KEY, "license_key");
+        assert_eq!(KEY_TIMEOUT_SECS, "timeout_secs");
     }
 
     #[test]
-    fn backslashes_in_values_are_kept_verbatim() {
-        let ini = write_ini(
-            r#"[license]
-server_url=http://127.0.0.1:9000
-api_key=ab\tc\nd
-"#,
+    fn license_key_is_trimmed_and_backslashes_kept_verbatim() {
+        let cfg = load("[license]\nserver_url=http://127.0.0.1:9000\nlicense_key=  ab\\tc\\nd  \n")
+            .expect("ini with backslashes");
+        assert_eq!(cfg.license_key.expose_secret(), r"ab\tc\nd");
+    }
+
+    #[test]
+    fn license_key_format_is_not_validated_client_side() {
+        let cfg =
+            load("[license]\nserver_url=https://license.example.com\nlicense_key=not-lk-format\n")
+                .expect("any non-empty key is accepted; format is judged by the server");
+        assert_eq!(cfg.license_key.expose_secret(), "not-lk-format");
+    }
+
+    #[test]
+    fn both_keys_present_uses_license_key_and_warns_without_values() {
+        let old = "old-api-key-value-must-not-leak";
+        let ini = write_ini(&format!(
+            "[license]\nserver_url=https://license.example.com\napi_key={old}\nlicense_key={KEY}\n"
+        ));
+        let parsed = ini::Ini::load_from_file_opt(ini.path(), verbatim_ini_option()).expect("ini");
+        let section = parsed.section(Some(SECTION)).expect("section");
+        let (cfg, warning) = LicenseConfig::from_section(section).expect("license_key wins");
+        assert_eq!(cfg.license_key.expose_secret(), KEY);
+
+        let warning = warning.expect("api_key ignored warning");
+        assert!(warning.contains("api_key"), "{warning}");
+        assert!(warning.contains("ignored"), "{warning}");
+        assert!(
+            !warning.contains('\n'),
+            "warning must be one line: {warning}"
         );
-        let cfg = LicenseConfig::load_from_path(ini.path()).expect("ini with backslashes");
-        assert_eq!(
-            cfg.api_key.as_ref().map(SecretString::expose_secret),
-            Some(r"ab\tc\nd")
+        assert!(!warning.contains(old), "warning leaked api_key: {warning}");
+        assert!(
+            !warning.contains(KEY),
+            "warning leaked license_key: {warning}"
         );
+
+        let cfg = LicenseConfig::load_from_path(ini.path()).expect("load_from_path");
+        assert_eq!(cfg.license_key.expose_secret(), KEY);
+    }
+
+    #[test]
+    fn license_key_alone_produces_no_warning() {
+        let ini = write_ini(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={KEY}\n"
+        ));
+        let parsed = ini::Ini::load_from_file_opt(ini.path(), verbatim_ini_option()).expect("ini");
+        let section = parsed.section(Some(SECTION)).expect("section");
+        let (_, warning) = LicenseConfig::from_section(section).expect("ok");
+        assert!(warning.is_none(), "{warning:?}");
+    }
+
+    #[test]
+    fn license_key_is_masked_in_debug() {
+        let secret = "lk_plainvalueshouldnotleak0000000000";
+        let cfg = LicenseConfig {
+            server_url: "https://license.example.com/".into(),
+            license_key: SecretString::new(secret),
+            timeout: Duration::from_secs(10),
+        };
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains(secret), "Debug leaked license_key: {debug}");
+        assert!(debug.contains("license_key: ***"), "{debug}");
+
+        let key_dbg = format!("{:?}", SecretString::new(secret));
+        assert_eq!(key_dbg, "***");
+    }
+
+    #[test]
+    fn loaded_ini_license_key_is_masked_in_debug() {
+        let secret = "ini-loaded-secret-must-not-appear-in-debug";
+        let cfg = load(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={secret}\n"
+        ))
+        .expect("load ini");
+        assert_eq!(cfg.license_key.expose_secret(), secret);
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains(secret), "Debug leaked license_key: {debug}");
+        assert!(debug.contains("***"), "{debug}");
+    }
+
+    #[test]
+    fn missing_license_key_is_config_error_naming_the_key() {
+        let msg = config_err_message("[license]\nserver_url=https://license.example.com\n");
+        assert!(msg.contains("license_key"), "{msg}");
+    }
+
+    #[test]
+    fn empty_license_key_is_config_error_naming_the_key() {
+        let msg =
+            config_err_message("[license]\nserver_url=https://license.example.com\nlicense_key=\n");
+        assert!(msg.contains("license_key"), "{msg}");
+    }
+
+    #[test]
+    fn whitespace_only_license_key_is_config_error_naming_the_key() {
+        let msg = config_err_message(
+            "[license]\nserver_url=https://license.example.com\nlicense_key=   \t \n",
+        );
+        assert!(msg.contains("license_key"), "{msg}");
+    }
+
+    #[test]
+    fn api_key_only_is_config_error_with_rename_guidance_and_no_value() {
+        let secret = "old-api-key-value-must-not-leak";
+        let msg = config_err_message(&format!(
+            "[license]\nserver_url=https://license.example.com\napi_key={secret}\n"
+        ));
+        assert!(msg.contains("api_key"), "{msg}");
+        assert!(msg.contains("license_key"), "{msg}");
+        assert!(msg.to_lowercase().contains("rename"), "{msg}");
+        assert!(
+            !msg.contains(secret),
+            "error must not include key value: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_path_is_rejected_as_no_longer_supported() {
+        let msg = config_err_message(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={KEY}\ncheck_path=/v1/license/check\n"
+        ));
+        assert!(msg.contains("check_path"), "{msg}");
+        assert!(msg.contains("no longer supported"), "{msg}");
+        assert!(msg.contains("fixed"), "{msg}");
+    }
+
+    #[test]
+    fn meter_path_is_rejected_as_no_longer_supported() {
+        let msg = config_err_message(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={KEY}\nmeter_path=/v1/license/meter\n"
+        ));
+        assert!(msg.contains("meter_path"), "{msg}");
+        assert!(msg.contains("no longer supported"), "{msg}");
+        assert!(msg.contains("fixed"), "{msg}");
+    }
+
+    #[test]
+    fn server_url_without_prefix_gets_one_trailing_slash() {
+        let cfg = load(&format!(
+            "[license]\nserver_url=http://127.0.0.1:9000\nlicense_key={KEY}\n"
+        ))
+        .expect("ini");
+        assert_eq!(cfg.server_url, "http://127.0.0.1:9000/");
+    }
+
+    #[test]
+    fn server_url_with_prefix_keeps_prefix_and_gets_trailing_slash() {
+        let cfg = load(&format!(
+            "[license]\nserver_url=https://host.example.com/prefix\nlicense_key={KEY}\n"
+        ))
+        .expect("ini");
+        assert_eq!(cfg.server_url, "https://host.example.com/prefix/");
+    }
+
+    #[test]
+    fn server_url_already_ending_with_slash_is_unchanged() {
+        let cfg = load(&format!(
+            "[license]\nserver_url=https://host.example.com/prefix/\nlicense_key={KEY}\n"
+        ))
+        .expect("ini");
+        assert_eq!(cfg.server_url, "https://host.example.com/prefix/");
+
+        let cfg = load(&format!(
+            "[license]\nserver_url=https://host.example.com//\nlicense_key={KEY}\n"
+        ))
+        .expect("ini");
+        assert_eq!(cfg.server_url, "https://host.example.com/");
+    }
+
+    #[test]
+    fn custom_timeout_is_loaded() {
+        let cfg = load(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={KEY}\ntimeout_secs=30\n"
+        ))
+        .expect("ini");
+        assert_eq!(cfg.timeout, Duration::from_secs(30));
     }
 
     #[test]
     fn missing_server_url_is_config_error_fail_closed() {
-        let ini = write_ini(
-            r#"[license]
-timeout_secs=5
-"#,
-        );
-        let err = LicenseConfig::load_from_path(ini.path()).expect_err("missing server_url");
-        assert!(matches!(err, LicenseError::Config(_)));
-        let msg = err.to_string();
-        assert!(
-            msg.contains("server_url") || msg.to_lowercase().contains("missing"),
-            "config error should mention missing server_url: {msg}"
-        );
+        let msg = config_err_message(&format!("[license]\nlicense_key={KEY}\n"));
+        assert!(msg.contains("server_url"), "{msg}");
     }
 
     #[test]
     fn missing_license_section_is_config_error() {
-        let ini = write_ini(
-            r#"[other]
-server_url=https://license.example.com
-"#,
-        );
-        let err = LicenseConfig::load_from_path(ini.path()).expect_err("missing section");
+        let err = load(&format!(
+            "[other]\nserver_url=https://license.example.com\nlicense_key={KEY}\n"
+        ))
+        .expect_err("missing section");
         assert!(matches!(err, LicenseError::Config(_)));
     }
 
@@ -306,97 +460,32 @@ server_url=https://license.example.com
 
     #[test]
     fn invalid_server_url_is_config_error() {
-        let ini = write_ini(
-            r#"[license]
-server_url=not-a-url
-"#,
-        );
-        let err = LicenseConfig::load_from_path(ini.path()).expect_err("bad url");
-        assert!(matches!(err, LicenseError::Config(_)));
+        let msg = config_err_message(&format!(
+            "[license]\nserver_url=not-a-url\nlicense_key={KEY}\n"
+        ));
+        assert!(msg.contains("server_url"), "{msg}");
     }
 
     #[test]
     fn empty_server_url_is_config_error() {
-        let ini = write_ini(
-            r#"[license]
-server_url=
-"#,
-        );
-        let err = LicenseConfig::load_from_path(ini.path()).expect_err("empty url");
-        assert!(matches!(err, LicenseError::Config(_)));
+        let msg = config_err_message(&format!("[license]\nserver_url=\nlicense_key={KEY}\n"));
+        assert!(msg.contains("server_url"), "{msg}");
     }
 
     #[test]
     fn non_positive_timeout_is_config_error() {
-        let ini = write_ini(
-            r#"[license]
-server_url=https://license.example.com
-timeout_secs=0
-"#,
-        );
-        let err = LicenseConfig::load_from_path(ini.path()).expect_err("timeout 0");
-        assert!(matches!(err, LicenseError::Config(_)));
+        let msg = config_err_message(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={KEY}\ntimeout_secs=0\n"
+        ));
+        assert!(msg.contains("timeout_secs"), "{msg}");
     }
 
     #[test]
     fn invalid_timeout_is_config_error() {
-        let ini = write_ini(
-            r#"[license]
-server_url=https://license.example.com
-timeout_secs=abc
-"#,
-        );
-        let err = LicenseConfig::load_from_path(ini.path()).expect_err("bad timeout");
-        assert!(matches!(err, LicenseError::Config(_)));
-    }
-
-    #[test]
-    fn api_key_is_masked_in_debug() {
-        let secret = "plain-api-key-value-should-not-leak";
-        let cfg = LicenseConfig {
-            server_url: "https://license.example.com".into(),
-            api_key: Some(SecretString::new(secret)),
-            timeout: Duration::from_secs(10),
-            check_path: DEFAULT_CHECK_PATH.into(),
-            meter_path: DEFAULT_METER_PATH.into(),
-        };
-        let debug = format!("{cfg:?}");
-        assert!(
-            !debug.contains(secret),
-            "Debug must not contain plaintext api_key: {debug}"
-        );
-        assert!(
-            debug.contains("***"),
-            "Debug should show masked api_key: {debug}"
-        );
-
-        let key_dbg = format!("{:?}", SecretString::new(secret));
-        assert_eq!(key_dbg, "***");
-        assert!(!key_dbg.contains(secret));
-    }
-
-    #[test]
-    fn loaded_ini_api_key_is_masked_in_debug() {
-        // Gap (task 5.1 / req 7.1, 7.3): mask must hold after round-trip load, not only
-        // when constructing LicenseConfig in memory.
-        let secret = "ini-loaded-secret-must-not-appear-in-debug";
-        let ini = write_ini(&format!(
-            "[license]\nserver_url=https://license.example.com\napi_key={secret}\n"
+        let msg = config_err_message(&format!(
+            "[license]\nserver_url=https://license.example.com\nlicense_key={KEY}\ntimeout_secs=abc\n"
         ));
-        let cfg = LicenseConfig::load_from_path(ini.path()).expect("load ini with api_key");
-        assert_eq!(
-            cfg.api_key.as_ref().map(SecretString::expose_secret),
-            Some(secret)
-        );
-        let debug = format!("{cfg:?}");
-        assert!(
-            !debug.contains(secret),
-            "Debug after ini load must not contain plaintext api_key: {debug}"
-        );
-        assert!(
-            debug.contains("***"),
-            "Debug after ini load should show masked api_key: {debug}"
-        );
+        assert!(msg.contains("timeout_secs"), "{msg}");
     }
 
     #[test]
@@ -409,22 +498,29 @@ timeout_secs=abc
             body.contains("[license]"),
             "example must define [license] section"
         );
+        let assigned = |key: &str| {
+            body.lines()
+                .map(str::trim)
+                .any(|l| l.starts_with(&format!("{key}=")))
+        };
+        assert!(assigned("server_url"), "example must set server_url");
         assert!(
-            body.contains("server_url"),
-            "example must document server_url"
+            assigned("license_key"),
+            "example must set license_key as a required key: {body}"
         );
-        assert!(body.contains("api_key"), "example must document api_key");
         assert!(
             body.contains("timeout_secs"),
             "example must document timeout_secs"
         );
+        for retired in ["api_key", "check_path", "meter_path"] {
+            assert!(
+                !body.contains(retired),
+                "example must not document retired key {retired}: {body}"
+            );
+        }
         assert!(
-            body.contains("check_path"),
-            "example must document check_path"
-        );
-        assert!(
-            body.contains("meter_path"),
-            "example must document meter_path"
+            body.contains("Authorization"),
+            "example must say license_key is sent only in the Authorization header: {body}"
         );
         let lower = body.to_lowercase();
         assert!(

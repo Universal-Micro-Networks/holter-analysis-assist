@@ -85,7 +85,9 @@ fn write_license_ini(dir: &TempDir, server_url: &str) -> PathBuf {
     let path = dir.path().join("license.ini");
     std::fs::write(
         &path,
-        format!("[license]\nserver_url={server_url}\ntimeout_secs=5\n"),
+        format!(
+            "[license]\nserver_url={server_url}\nlicense_key=lk_0123456789abcdef0123456789abcdef\ntimeout_secs=5\n"
+        ),
     )
     .expect("write license.ini");
     path

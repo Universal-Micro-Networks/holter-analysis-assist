@@ -1,6 +1,7 @@
 //! Blocking HTTP adapter for the license server ([`ReqwestLicenseClient`]).
 //!
-//! Uses [`LicenseConfig`] URLs, paths, timeout, and optional Bearer `api_key`.
+//! Uses [`LicenseConfig`] `server_url`, timeout, and `license_key` (always sent
+//! as `Authorization: Bearer`). Endpoint paths are fixed in this adapter.
 //!
 //! **Provisional policy (until a real license server is available):** when the
 //! server is unreachable, times out, returns non-2xx, or returns unparseable
@@ -8,7 +9,7 @@
 //! `allowed: false` still denies. Restore fail-closed transport mapping when
 //! the license server is production-ready.
 //!
-//! Error / Debug output must never include the API key plaintext.
+//! Error / Debug output must never include the license key plaintext.
 
 use super::client::LicenseClient;
 use super::config::LicenseConfig;
@@ -17,6 +18,9 @@ use super::types::{
 };
 use serde::Serialize;
 use std::fmt;
+
+const CHECK_PATH: &str = "/v1/license/check";
+const METER_PATH: &str = "/v1/license/meter";
 
 /// Blocking reqwest implementation of [`LicenseClient`].
 pub struct ReqwestLicenseClient {
@@ -57,13 +61,10 @@ impl ReqwestLicenseClient {
         &self,
         req: reqwest::blocking::RequestBuilder,
     ) -> reqwest::blocking::RequestBuilder {
-        match &self.config.api_key {
-            Some(key) => req.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", key.expose_secret()),
-            ),
-            None => req,
-        }
+        req.header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", self.config.license_key.expose_secret()),
+        )
     }
 
     fn post_json<B: Serialize>(
@@ -124,7 +125,7 @@ impl LicenseClient for ReqwestLicenseClient {
             })
         };
 
-        let (status, text) = match self.post_json(&self.config.check_path, &serde_json::json!({})) {
+        let (status, text) = match self.post_json(CHECK_PATH, &serde_json::json!({})) {
             Ok(v) => v,
             Err(msg) => return provisional_allow(msg),
         };
@@ -178,7 +179,7 @@ impl LicenseClient for ReqwestLicenseClient {
             kind: "analyze_job",
         };
 
-        let (status, text) = match self.post_json(&self.config.meter_path, &body) {
+        let (status, text) = match self.post_json(METER_PATH, &body) {
             Ok(v) => v,
             Err(msg) => return provisional_allow(msg),
         };
@@ -367,19 +368,14 @@ mod tests {
         }
     }
 
-    fn config_for(
-        base: &str,
-        api_key: Option<&str>,
-        timeout: Duration,
-        check_path: &str,
-        meter_path: &str,
-    ) -> LicenseConfig {
+    const TEST_KEY: &str = "lk_0123456789abcdef0123456789abcdef";
+
+    /// Mirrors `LicenseConfig::load_from_path` normalization (one trailing `/`).
+    fn config_for(base: &str, license_key: &str, timeout: Duration) -> LicenseConfig {
         LicenseConfig {
-            server_url: base.to_string(),
-            api_key: api_key.map(SecretString::new),
+            server_url: format!("{}/", base.trim_end_matches('/')),
+            license_key: SecretString::new(license_key),
             timeout,
-            check_path: check_path.to_string(),
-            meter_path: meter_path.to_string(),
         }
     }
 
@@ -390,14 +386,9 @@ mod tests {
             body: r#"{"allowed":true,"message":"ok"}"#.into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            Some("test-secret-key"),
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client =
+            ReqwestLicenseClient::new(config_for(&base, "test-secret-key", Duration::from_secs(5)))
+                .expect("client");
 
         let result = client.check_validity().expect("check ok");
         assert!(result.allowed);
@@ -419,14 +410,8 @@ mod tests {
             body: r#"{"allowed":true}"#.into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            None,
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
+            .expect("client");
 
         let result = client.authorize_and_meter().expect("meter ok");
         assert!(result.allowed);
@@ -435,10 +420,34 @@ mod tests {
         let req = captured.lock().unwrap().clone().expect("captured");
         assert_eq!(req.method, "POST");
         assert_eq!(req.path, "/v1/license/meter");
-        assert!(req.authorization.is_none());
+        assert_eq!(
+            req.authorization.as_deref(),
+            Some(format!("Bearer {TEST_KEY}").as_str())
+        );
         let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
         assert_eq!(body["units"], 1);
         assert_eq!(body["kind"], "analyze_job");
+    }
+
+    #[test]
+    fn server_url_path_prefix_is_kept_when_joining_endpoints() {
+        let (base, captured, handle) = spawn_mock(MockResponse {
+            status_line: "HTTP/1.1 200 OK",
+            body: r#"{"allowed":true}"#.into(),
+            delay: None,
+        });
+        let client = ReqwestLicenseClient::new(config_for(
+            &format!("{base}/prefix"),
+            TEST_KEY,
+            Duration::from_secs(5),
+        ))
+        .expect("client");
+
+        client.check_validity().expect("check ok");
+
+        handle.join().expect("mock thread");
+        let req = captured.lock().unwrap().clone().expect("captured");
+        assert_eq!(req.path, "/prefix/v1/license/check");
     }
 
     #[test]
@@ -448,14 +457,8 @@ mod tests {
             body: r#"{"allowed":false,"message":"license expired"}"#.into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            None,
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
+            .expect("client");
 
         let err = client.check_validity().expect_err("deny");
         assert!(
@@ -472,14 +475,8 @@ mod tests {
             body: r#"{"allowed":false,"message":"quota exceeded"}"#.into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            None,
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
+            .expect("client");
 
         let err = client.authorize_and_meter().expect_err("deny");
         assert!(
@@ -496,14 +493,8 @@ mod tests {
             body: r#"{"error":"down"}"#.into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            None,
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
+            .expect("client");
 
         let result = client
             .check_validity()
@@ -527,14 +518,8 @@ mod tests {
             body: "oops".into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            None,
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
+            .expect("client");
 
         let result = client
             .authorize_and_meter()
@@ -550,14 +535,9 @@ mod tests {
             body: r#"{"allowed":true}"#.into(),
             delay: Some(Duration::from_secs(3)),
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            None,
-            Duration::from_millis(200),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client =
+            ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_millis(200)))
+                .expect("client");
 
         let result = client
             .check_validity()
@@ -591,10 +571,8 @@ mod tests {
         // Nothing listening on this port.
         let client = ReqwestLicenseClient::new(config_for(
             "http://127.0.0.1:1",
-            None,
+            TEST_KEY,
             Duration::from_millis(500),
-            "/v1/license/check",
-            "/v1/license/meter",
         ))
         .expect("client");
 
@@ -605,26 +583,20 @@ mod tests {
     }
 
     #[test]
-    fn errors_and_debug_never_contain_api_key_plaintext() {
-        let secret = "super-secret-api-key-must-not-leak";
+    fn errors_and_debug_never_contain_license_key_plaintext() {
+        let secret = "super-secret-license-key-must-not-leak";
         let (base, _captured, handle) = spawn_mock(MockResponse {
             status_line: "HTTP/1.1 401 Unauthorized",
             body: r#"{"allowed":false}"#.into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            Some(secret),
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client = ReqwestLicenseClient::new(config_for(&base, secret, Duration::from_secs(5)))
+            .expect("client");
 
         let debug = format!("{client:?}");
         assert!(
             !debug.contains(secret),
-            "Debug must not leak api_key: {debug}"
+            "Debug must not leak license_key: {debug}"
         );
         assert!(debug.contains("***") || !debug.to_lowercase().contains("super-secret"));
 
@@ -644,14 +616,8 @@ mod tests {
             body: "not-json".into(),
             delay: None,
         });
-        let client = ReqwestLicenseClient::new(config_for(
-            &base,
-            None,
-            Duration::from_secs(5),
-            "/v1/license/check",
-            "/v1/license/meter",
-        ))
-        .expect("client");
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
+            .expect("client");
 
         let result = client
             .check_validity()

@@ -178,6 +178,7 @@ fn write_merged_ini_opts(
              \n\
              [license]\n\
              server_url={server_url}\n\
+             license_key=lk_0123456789abcdef0123456789abcdef\n\
              timeout_secs=5\n",
             opts.max_body_bytes, opts.request_timeout_secs, opts.model_path, opts.extra_http
         ),
