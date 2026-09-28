@@ -4,11 +4,11 @@
 #
 # [license] is NOT redefined here. Use the upstream canonical sample:
 #   config/license.ini.example
-# Merge options for deployment:
-#   1. Append an [http] section to a copy of license.ini (keep [license] keys unchanged), or
-#   2. Keep separate files and pass each path to the HTTP / license loaders.
-# The `holter-http-api` binary expects one `--config` / HOLTER_HTTP_INI file that
-# contains both [http] and [license] (option 1). Default path: config/http.ini.
+# Deployment: append this [http] section to a copy of license.ini (keep the
+# [license] keys unchanged) so that ONE file contains both sections.
+# `holter-http-api` and `holter-analysis-assist serve-http` read a single
+# `--config` / HOLTER_HTTP_INI file (default: config/http.ini); separate
+# [http] / [license] files are not supported.
 # Do not invent alternate license key names (server_url, license_key, etc.).
 #
 # TLS / transport:
@@ -28,12 +28,16 @@ bind=0.0.0.0:8080
 # Default: 1800 (30 minutes).
 # request_timeout_secs=1800
 
-# Optional. Filesystem path to an ONNX model for non-embedded / dev builds.
-# When unset and the binary is built with embedded-model, the embedded model is used.
+# Optional. Filesystem path to an ONNX model. When unset: the embedded model
+# (embedded-model builds, e.g. the distributed binaries) or
+# resources/models/phase2_rev1.onnx relative to the working directory
+# (non-embedded / dev builds). When set, it overrides the embedded model.
 # model_path=/path/to/phase2_rev1.onnx
 
 # Optional. ONNX Runtime execution provider. Default: auto (cuda then cpu).
-# Allowed: auto | cpu | cuda
+# Allowed (case-insensitive): auto | cpu | cuda (aliases for cuda: gpu, nvidia)
+# Builds without the `cuda` cargo feature (e.g. the distributed CPU binaries)
+# cannot use cuda; auto then runs on cpu.
 # provider=auto
 
 # ---------------------------------------------------------------------------
@@ -104,6 +108,8 @@ bind=0.0.0.0:8080
 # 4. Health: GET /health → 200 {"status":"ok"} and does not call license meter.
 # 5. One analyze: POST /v1/analyze with multipart field `ecl` (valid filename)
 #    → success CSV/JSON; license meter counted once per request (not per window).
+#    Request fields, output format selection and error codes: README.md
+#    ("HTTP API / UI コンソールの使い方").
 #
 # Automated coverage of listen / deny / meter-once / oversize uses mock license
 # servers in tests/http_api_listen.rs (task 5.2). This block is operator guidance.

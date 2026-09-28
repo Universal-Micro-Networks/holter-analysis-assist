@@ -18,11 +18,11 @@ Holter HTTP API を Linux クラウド向けコンテナイメージとして導
 
 ## イメージの取得・ビルド
 
-リリース成果物として公開されたイメージを pull するか、検証済みステージングからビルドします。
+イメージはレジストリへは公開していません。リリース成果物（GitHub Actions の Artifact `packaging-docker-linux-x86_64-cpu`）の `docker save` アーカイブを読み込むか、検証済みステージングからビルドします。
 
 ```bash
-# 例: 公開タグ（CPU 既定）
-docker pull <registry>/holter-http-api:<version>-cpu
+# 例: リリース成果物のアーカイブを読み込む（タグ holter-http-api:<version>-cpu が付く）
+docker load -i holter-http-api-<version>-linux-x86_64-cpu.tar.gz
 
 # またはローカルビルド（staging 検証後）
 ./packaging/scripts/build-docker.sh \
@@ -39,8 +39,10 @@ docker pull <registry>/holter-http-api:<version>-cpu
 1. サンプルをランタイム設定へコピーする（コンテナ起動時にボリュームマウント、または起動前にファイルを用意）
 2. 少なくとも次を環境に合わせて編集する
    - `[license]` の **`server_url`** … ライセンスサーバー到達先 URL（キー意味の正本は上流 `config/license.ini.example`）
+   - `[license]` の **`license_key`** … 発行されたライセンスキー（**必須**。未設定・空では起動しません。`Authorization: Bearer` でのみ送信。正本は上流 `config/license.ini.example`）
    - `[http]` の **`bind`** … リッスンアドレス（例: `0.0.0.0:8080`。正本は上流 `config/http.ini.example`）
 3. 既定の設定パスは `HOLTER_HTTP_INI=/app/config/http.ini`（または `--config`）です
+4. `license_key` を含む ini は秘密情報です。ホスト側のファイルは所有者だけが読める権限にしてください（例: `chmod 600`。コンテナ内の実行ユーザーが読めることも確認する）
 
 キー意味・権限注記は上流 example のコメントに従い、本ドキュメントでは再定義しません。
 

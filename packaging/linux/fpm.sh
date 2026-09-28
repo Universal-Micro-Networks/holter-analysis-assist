@@ -12,6 +12,7 @@
 #   /usr/bin/holter-http-api
 #   /usr/share/holter-http-api/NOTICE
 #   /usr/share/holter-http-api/http.ini.example
+#   /usr/share/holter-http-api/docs/   (short docs, when staging has docs/)
 #
 # Architectures: deb=amd64, rpm=x86_64
 # Both -t deb and -t rpm are required from the same staging input.

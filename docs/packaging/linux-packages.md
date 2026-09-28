@@ -13,7 +13,7 @@ Holter HTTP API を deb または rpm で Linux ホストへ導入する手順�
 ## 前提
 
 - パッケージは埋め込みモデル付き `holter-http-api` を配置します（生モデルは同梱しません）
-- 同一リリース入力から **`.deb` と `.rpm` の両方**が提供されます
+- 同一のステージング入力から **`.deb` と `.rpm` の両方**を作ります。作成するのは CI（`.github/workflows/ci.yml`）の `package-linux` ジョブで、Artifact `packaging-deb-linux-x86_64-cpu` / `packaging-rpm-linux-x86_64-cpu` として残ります（GitHub Release 時の `release-packaging.yml` は deb / rpm を作りません）
 - ライセンスサーバー本体、HTTP API 契約・ini キー意味の再設計は**範囲外**です（上流 `license-client` / `http-api` または別プロジェクトへ）
 
 ## 導入
@@ -41,6 +41,7 @@ sudo rpm -Uvh holter-http-api-<version>-1.x86_64.rpm
 | バイナリ | `/usr/bin/holter-http-api` |
 | NOTICE | `/usr/share/holter-http-api/NOTICE` |
 | サンプル ini | `/usr/share/holter-http-api/http.ini.example` |
+| 短縮ドキュメント | `/usr/share/holter-http-api/docs/` |
 
 ## サンプル ini の編集
 
@@ -54,9 +55,17 @@ sudo rpm -Uvh holter-http-api-<version>-1.x86_64.rpm
 
 2. 少なくとも次を編集する
    - `[license]` の **`server_url`** … ライセンスサーバー URL（正本: 上流 `config/license.ini.example`）
+   - `[license]` の **`license_key`** … 発行されたライセンスキー（**必須**。未設定・空では起動しません。`Authorization: Bearer` でのみ送信。正本: 上流 `config/license.ini.example`）
    - `[http]` の **`bind`** … リッスン指定（例: `0.0.0.0:8080`。正本: 上流 `config/http.ini.example`）
 
-3. キー意味は上流 example のコメントに従い、本ドキュメントでは再定義しません
+3. `license_key` を含むため、ファイルは起動ユーザーだけが読める権限にする（例）
+
+   ```bash
+   sudo chown <起動ユーザー> /etc/holter-http-api/http.ini
+   sudo chmod 600 /etc/holter-http-api/http.ini
+   ```
+
+4. キー意味は上流 example のコメントに従い、本ドキュメントでは再定義しません
 
 ## NOTICE の所在
 

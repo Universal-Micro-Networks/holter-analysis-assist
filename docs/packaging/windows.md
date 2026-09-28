@@ -39,6 +39,7 @@ Holter HTTP API を Windows 向けインストーラで導入する手順です�
    - `[license]` の **`license_key`** … 発行されたライセンスキー（正本: 上流 `config/license.ini.example`）
    - `[http]` の **`bind`** … リッスン指定（例: `0.0.0.0:8080`。正本: 上流 `config/http.ini.example`）
 3. 必要に応じて上流 example のコメントに従い任意項目（`timeout_secs` 等）を設定する（キー意味は再定義しない）
+4. `license_key` を含む ini は秘密情報です。起動ユーザー（と管理者）だけが読める ACL にしてください
 
 ## NOTICE の所在
 

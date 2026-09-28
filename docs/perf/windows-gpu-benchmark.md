@@ -182,6 +182,7 @@ CUDA Graph は GPU 実機でしか確認できません。本番で `cuda_graph`
 ```powershell
 # CUDA の PATH 設定（README「NVIDIA（CUDA）」と同じ）
 $env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4"
+# ORT_CUDA_VERSION はビルド時（cargo build）だけ参照され、既定も 13。ビルド済み exe の実行には不要
 $env:ORT_CUDA_VERSION = "13"
 $env:PATH = "C:\Program Files\NVIDIA\CUDNN\v9.26\bin\13.4\x64;$env:CUDA_PATH\bin;$env:CUDA_PATH\bin\x64;$env:PATH"
 
@@ -220,6 +221,8 @@ HTTP では解析リクエストごとに別スレッドから同じ常駐モデ
 
    [license]
    server_url=https://license.example.com
+   # 必須。発行されたライセンスキー（この ini は所有者だけが読める権限にする）
+   license_key=lk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    ```
 
 2. 4.4 と同じく CUDA の PATH を設定したシェルで起動する:

@@ -20,10 +20,10 @@ PYTHONPATH=tools python tools/export/export_onnx.py \
   --output resources/models/phase2_rev1.onnx
 ```
 
-成功すると次が生成されます（いずれも gitignore 対象のバイナリ／メタ）:
+成功すると次が生成されます:
 
-- `resources/models/phase2_rev1.onnx`
-- `resources/models/phase2_rev1.onnx.json`（入出力契約）
+- `resources/models/phase2_rev1.onnx`（gitignore 対象のバイナリ）
+- `resources/models/phase2_rev1.onnx.json`（入出力契約。`resources/models/*.onnx.json` は Git 管理対象）
 
 スクリプトは Keras と ONNX Runtime の出力を数値比較します。
 

@@ -37,7 +37,8 @@ Default output root: `packaging/out/staging/<os>/`.
 ## Sample ini key ownership (do not redefine)
 
 - `[license]` keys: copy/reference only from `config/license.ini.example` (license-client).
-  Required example: `server_url=...`
+  Required keys: `server_url=...` and `license_key=...` (placeholder in the sample;
+  startup fails when it is missing or empty).
 - `[http]` keys: copy/reference only from `config/http.ini.example` (http-api).
   Required example: `bind=0.0.0.0:8080`
 - Packaging must not introduce `packaging.ini.example` as a key canonical.
@@ -49,7 +50,9 @@ Default output root: `packaging/out/staging/<os>/`.
 
 - Copy the sample to the runtime config path expected by `holter-http-api`
   (`--config` / `HOLTER_HTTP_INI`; default `config/http.ini`).
-- Set at least `server_url` (license) and `bind` (HTTP listen).
+- Set at least `server_url` and `license_key` (license) and `bind` (HTTP listen).
+  The file then holds a secret: restrict it to the service owner (e.g. `chmod 600`,
+  owner-only ACL on Windows).
 - Key meanings remain as documented in the upstream example comments; this
   packaging layer does not redefine them.
 - NOTICE location in artifacts: alongside the binary / under the package share

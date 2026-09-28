@@ -16,8 +16,9 @@
 ; Output: holter-http-api-setup-<version>-cpu.exe
 ; Tag policy: CPU is the required default; CUDA (if any) is a separate artifact.
 ;
-; After install: copy http.ini.example → config\http.ini, set license server_url
-; and http bind, then run holter-http-api.exe --config config\http.ini
+; After install: copy http.ini.example → config\http.ini, set license server_url,
+; license_key (required secret; owner-only ACL) and http bind, then run
+; holter-http-api.exe --config config\http.ini
 ; (see docs/packaging/windows.md — InstallDocs task).
 
 #ifndef MyAppVersion

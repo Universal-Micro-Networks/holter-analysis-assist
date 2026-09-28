@@ -22,7 +22,8 @@
 #
 # Config path (upstream http-api):
 #   --config / HOLTER_HTTP_INI (default config/http.ini)
-#   Copy/edit the sample: http.ini.example → config/http.ini (set license server_url + bind)
+#   Copy/edit the sample: http.ini.example → config/http.ini (set license server_url +
+#   license_key (required secret; keep the mounted file owner-only) + http bind)
 #
 # Listen port: sample ini uses bind=0.0.0.0:8080 → map host port to container 8080.
 

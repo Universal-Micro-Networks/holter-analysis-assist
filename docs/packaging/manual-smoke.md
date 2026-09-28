@@ -14,26 +14,27 @@
 
 ## 1. コンテナイメージ起動（Linux x86_64）
 
-- [ ] CPU タグのイメージを pull または `build-docker.sh` で構築できる
-- [ ] サンプル ini をコピーし `server_url` / `bind` を実環境向けに編集した `http.ini` をマウントできる
+- [ ] CPU タグのイメージを `docker load`（リリース成果物の `docker save` アーカイブ）または `build-docker.sh` で用意できる
+- [ ] サンプル ini をコピーし `server_url` / `license_key` / `bind` を実環境向けに編集した `http.ini` をマウントできる
 - [ ] `docker run` でプロセスが起動し、ホストからポート（例: 8080）へ到達できる
 - [ ] コンテナ内 `/app/NOTICE` が参照できる
 
 ## 2. Windows インストーラ導入（Windows x86_64）
 
 - [ ] `holter-http-api-setup-<version>-cpu.exe` を実行し、導入先に `holter-http-api.exe`・`http.ini.example`・`NOTICE` が配置される
-- [ ] サンプル ini を編集（少なくとも `server_url` / `bind`）したうえで `holter-http-api.exe --config ...` が起動する
+- [ ] サンプル ini を編集（少なくとも `server_url` / `license_key` / `bind`）したうえで `holter-http-api.exe --config ...` が起動する
 - [ ] インストーラ失敗時に失敗と分かる（サイレント成功にならない）
 
 ## 3. Linux パッケージ導入（deb / rpm、x86_64／amd64）
 
 - [ ] `.deb` および／または `.rpm` をインストールできる
 - [ ] `/usr/bin/holter-http-api`・`/usr/share/holter-http-api/NOTICE`・`http.ini.example` が所定位置にある
-- [ ] サンプル ini をコピー編集後、`holter-http-api --config ...` で起動できる
+- [ ] サンプル ini をコピーし `server_url` / `license_key` / `bind` を編集後、`holter-http-api --config ...` で起動できる
 
 ## 4. ini 設定後の起動（全系統共通）
 
-- [ ] `[license] server_url` が到達可能なライセンス環境（または運用で許可されたモック／スキップ可能な検証環境）を指している
+- [ ] `[license] server_url` が到達可能なライセンスサーバー（本番、または運用で許可された検証用サーバー）を指している。ライセンス確認を省略する手段はないため、到達できないと起動しない
+- [ ] `[license] license_key` に発行済みのキーを設定し、ini を所有者だけが読める権限にしている
 - [ ] `[http] bind` が意図したリッスンになっている
 - [ ] プロセス起動後、上流 `http-api` の手順に沿ったヘルスまたは最小リクエストで受付可能な状態を確認できる
 
