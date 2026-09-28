@@ -214,6 +214,10 @@ sequenceDiagram
     participant Srv as LicenseServer
 
     Caller->>Canonical: analyze job
+    Canonical->>Canonical: parse filename load model read ECL preprocess
+    alt input or model invalid
+        Canonical-->>Caller: input or model error no meter
+    end
     Canonical->>Gate: ensure_inference_allowed via try_global
     alt gate not installed
         Gate-->>Canonical: InferenceDenied gate_not_installed
@@ -225,7 +229,7 @@ sequenceDiagram
             Srv-->>Cli: allowed used monthly_limit remaining period
             Cli-->>Gate: Ok
             Gate-->>Canonical: Ok
-            Canonical->>Canonical: preprocess infer postprocess
+            Canonical->>Canonical: infer postprocess output
             Canonical-->>Caller: results
         else error code or transport failure
             Srv-->>Cli: ok false with error code
@@ -237,7 +241,7 @@ sequenceDiagram
 ```
 
 **Key Decisions**:
-- 起動確認はサブコマンド分岐前（または HTTP の listen 前）に 1 回。利用記録は正本入口の先頭で 1 回のみ（変更なし）
+- 起動確認はサブコマンド分岐前（または HTTP の listen 前）に 1 回。利用記録は 1 ジョブ 1 回のまま、呼出位置を正本入口の先頭から「前処理の後・推論の直前」へ移す。ファイル名・ECL 内容・モデル読み込みの不備では計上しない。推論開始後の失敗（推論エラー、出力書き込み失敗、HTTP のタイムアウト）は計上済みのまま返す
 - 利用記録は自動リトライしない（二重計上の回避）。要求過多・一時障害は再試行可能な拒否として呼出側へ返す
 - 到達不能・タイムアウト・非成功応答・解釈不能な応答はすべて拒否（暫定許可の撤廃）
 
@@ -246,7 +250,7 @@ sequenceDiagram
 | Requirement | Summary | Components | Interfaces | Flows |
 |-------------|---------|------------|------------|-------|
 | 1.1–1.4 | 起動時有効性確認と起動拒否 | LicenseGate, ReqwestLicenseClient, CliStartup | `ensure_startup_licensed`, `check_validity`, `install` | 起動時確認 |
-| 2.1–2.5 | 推論時の利用記録、window 非計上 | LicenseGate, AnalyzeEntry | `ensure_inference_allowed`, `authorize_and_meter` | 1 推論ごと |
+| 2.1–2.6 | 推論時の利用記録、window 非計上、入力不備では非計上 | LicenseGate, AnalyzeEntry | `ensure_inference_allowed`, `authorize_and_meter` | 1 推論ごと |
 | 3.1–3.4 | 1 推論 = 解析ジョブ、ラッパ非二重計上 | AnalyzeEntry, LicenseGate | 正本入口のみ | 1 推論ごと |
 | 4.1–4.6 | ini 設定・同一キー・正本 sample・必須欠落 fail-closed | LicenseConfig, LicenseIniDocs | `LicenseConfig::load_from_path`, `config/license.ini.example` | 起動時確認 |
 | 5.1–5.3 | 起動失敗 / 推論拒否の区分 | LicenseTypes, LicenseGate | `LicenseError` | 両フロー |
@@ -273,7 +277,7 @@ sequenceDiagram
 | LicenseClient / MockLicenseClient | Port | サーバー通信の差し替え可能境界 | 1.x, 2.x, 6.x | LicenseTypes (P0) | Service |
 | ReqwestLicenseClient | Adapter | 確定契約の blocking HTTP 実装 | 1.x, 2.x, 8.4, 10.x, 11.x, 12.4, 12.5 | reqwest (P0), LicenseConfig (P0) | API |
 | LicenseGate | Application | 起動/推論ゲートと process-wide install | 1.x, 2.x, 3.x, 5.x, 9.x | LicenseClient (P0) | Service |
-| AnalyzeEntryIntegration | Analyze | 正本入口でゲート適用（二重計上なし） | 2.x, 3.x, 9.2, 9.3 | LicenseGate (P0) | — |
+| AnalyzeEntryIntegration | Analyze | 前処理後・推論直前でゲート適用（二重計上なし、入力不備は非計上） | 2.x, 3.x, 9.2, 9.3 | LicenseGate (P0) | — |
 | HttpErrorLicenseMapping | HTTP | 拒否理由を HTTP ステータス・コードへ対応付け | 11.7 | LicenseTypes (P0), http-api `HttpError` (P0) | API |
 | LicenseMockServer | Test support | 確定契約を話す結合テスト用モック | 6.2, 6.3 | std TcpListener (P0) | — |
 | LicenseIniDocs | Docs | 正本 sample・README・関連文書 | 4.5, 4.6, 7.2, 8.x, 12.1 | — | — |
@@ -483,10 +487,13 @@ pub enum MockOutcome {
 | Field | Detail |
 |-------|--------|
 | Intent | 正本公開入口で利用記録を 1 回行う（二重計上なし） |
-| Requirements | 2.1–2.5, 3.1–3.4, 9.2, 9.3 |
+| Requirements | 2.1–2.6, 3.1–3.4, 9.2, 9.3 |
 
 **Responsibilities & Constraints**
-- 呼出位置・回数は変更しない。未 install 時のエラー値を新しい形に合わせるのみ
+- 回数は 1 ジョブ 1 回のまま。未 install 時のエラー値を新しい形に合わせる
+- 呼出位置は、共通の解析本体で ECL の読み込みと前処理（ファイル名解析・読み込み・連続信号化・window 開始点の決定）を終えた後、最初の window 推論の前とする。`analyze_ecl_with_source` はそれより前にモデルを読み込むため、モデル不備も計上前に失敗する。`analyze_ecl_with_model(_observed)` も同じ本体を通るので同じ順序になる
+- ゲート未 install の判定も同じ位置で行う（入力不備が先に見つかればその失敗を返す。いずれの場合も結果は出力しない）
+- 呼出位置の移動により、計上の有無を確かめる単体テスト・結合テストは「有効な ECL と読み込めるモデル」を前提に書き直す（無効入力で計上 1 回を期待していたテストは、計上 0 回の期待に改める）
 
 #### HttpErrorLicenseMapping
 

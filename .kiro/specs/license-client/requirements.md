@@ -60,6 +60,7 @@
 3. If 推論時の許可確認または利用計上が失敗する（拒否・通信不能・タイムアウト・設定不備を含む）, the Holter Analysis Assist shall 当該推論を拒否し、解析結果を出力しない
 4. The Holter Analysis Assist shall 推論拒否の理由を、オペレータまたは呼出側が推論拒否と識別できる形で提示する
 5. The Holter Analysis Assist shall 同一推論内の複数 ONNX window 処理に対して、追加の許可確認・利用計上を行わない
+6. If 入力（ECL のファイル名・内容）の不備、またはモデルの読み込み失敗により推論に進めない, the Holter Analysis Assist shall 利用計上を行わずにその失敗を返す
 
 ### Requirement 3: 「1 推論」の定義
 
