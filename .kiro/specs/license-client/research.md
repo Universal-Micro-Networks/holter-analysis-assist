@@ -62,6 +62,7 @@
 - **Rationale**: MSRV / CLI / brief の三条件を満たす
 - **Trade-offs**: 将来 API が async 化しても blocking 呼び出しは短いネットワーク待ちとして許容。必要なら後で async ポートを追加
 - **Follow-up**: CI で Linux/Windows の依存解決を確認
+- **改訂メモ（2026-09-29）**: `rust-version` は 1.88 に引き上げられ（`ort 2.0.0-rc.13` が 1.88、clap 4.6 が 1.85 を要求）、「reqwest 0.13 は MSRV 1.85 のため不可」という理由は現在は成り立たない。reqwest は 0.12 blocking のまま動作しており、移行は実施していない（blocking で CLI に async ランタイムを持ち込まない、という他の理由は引き続き有効）
 
 ### Decision: ゲートは lib の解析入口 + プロセス入口
 - **Context**: CLI と将来 API が同一コアを共有（steering）

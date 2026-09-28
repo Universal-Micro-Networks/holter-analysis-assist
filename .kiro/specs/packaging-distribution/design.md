@@ -128,29 +128,37 @@ packaging/
 │   └── README.md                  # ステージングレイアウト仕様
 ├── docker/
 │   ├── Dockerfile                 # バイナリ COPY 型ランタイム
-│   └── .dockerignore              # models/onnx 等を除外
+│   └── .dockerignore              # models/onnx 等を除外（build-docker.sh が staging へコピー）
 ├── windows/
 │   └── holter-http-api.iss        # Inno Setup スクリプト
 ├── linux/
-│   ├── stage.sh                   # 共通ステージング組み立て
 │   └── fpm.sh                     # deb / rpm 生成
+├── out/                           # 生成物（Git 管理外。既定の staging は out/staging/<os>/）
 └── scripts/
+    ├── prepare-staging.sh         # バイナリ+上流 ini ソース+NOTICE を staging へ（共通ステージング組み立て）
+    ├── assemble-ini-sample.sh     # [license] + [http] の example をマージした配布用サンプルを staging へ
     ├── verify-artifact.sh         # NOTICE/ini/生モデル検査
-    └── prepare-staging.sh         # バイナリ+上流 ini ソース+NOTICE を staging へ
+    ├── build-docker.sh            # .dockerignore を staging に置き Docker イメージをビルド
+    └── build-inno.sh              # ISCC で Inno インストーラをビルド
 docs/
 └── packaging/
     ├── docker.md
     ├── windows.md
-    └── linux-packages.md
+    ├── linux-packages.md
+    └── manual-smoke.md            # 実バイナリ配布の手動スモーク観点（CI 必須ではない）
 # 配布用マージ済みサンプルはパッケージ時に staging へ組み立てる（正本は上流）
 # 参照元: config/license.ini.example（license-client）
 #         config/http.ini.example 等の [http]（http-api）
 .github/workflows/
-└── ci.yml                         # packaging ジョブ追加（入力: release-embedded-http-api）
+├── ci.yml                         # packaging ジョブ（package-windows / package-linux。入力: release-embedded-http-api）
+└── release-packaging.yml          # GitHub Release 公開時の配布ビルド（Inno + Docker のみ。fail-closed）
 ```
 
+> **実装同期（2026-09-29）**: 設計時に置いていた `packaging/linux/stage.sh` は作らず、共通ステージングは `packaging/scripts/prepare-staging.sh` が担う。ビルド手順は `build-docker.sh` / `build-inno.sh` / `fpm.sh` にスクリプト化し、ini サンプルのマージは `assemble-ini-sample.sh` が行う。
+
 ### Modified Files
-- `.github/workflows/ci.yml` — **OWN**: packaging ジョブ（Docker / Inno / fpm + 検証・アップロード）。**消費**: http-api（または合意 CI）の artifact `release-embedded-http-api`（埋め込み `holter-http-api`）。**非所有**: model-embedding の `release-embedded-cli`。CUDA 任意ジョブは分離
+- `.github/workflows/ci.yml` — **OWN**: packaging ジョブ `package-windows`（Inno）と `package-linux`（Docker + deb/rpm）、いずれも検証・アップロード付き。**消費**: http-api の artifact `release-embedded-http-api`（埋め込み `holter-http-api`）。**非所有**: model-embedding の `release-embedded-cli`。CUDA 任意ジョブは分離
+- `.github/workflows/release-packaging.yml` — **OWN**: GitHub Release の公開（`release: published`。手動の `workflow_dispatch` も可）で起動する配布ビルド。埋め込み `holter-http-api`（CPU、`--no-default-features --features embedded-model`）を自前でビルドし、Windows インストーラ（Inno）と Docker イメージ（`docker save` の gzip）を Actions artifact として出す。deb / rpm は作らない。通常 CI の soft-skip と違い、埋め込み用 secret 欠落・バイナリ欠落・verify 失敗・パッケージ失敗はすべてワークフロー失敗（fail-closed）
 - サンプル ini は `config/license.ini.example` と http-api の `[http]` example をコピー／参照し、必要ならパッケージ時に単一ランタイム用サンプルへマージ（キー意味は変更しない）
 
 ## System Flows
@@ -426,7 +434,8 @@ flowchart LR
 |------|----------------------|--------|
 | 入力（消費） | `release-embedded-http-api`（埋め込み `holter-http-api`） | http-api（または合意した同一 CI ジョブ） |
 | 非入力・非再定義 | `release-embedded-cli` | model-embedding |
-| 本仕様 OWN | packaging ジョブ群（例: `package-docker` / `package-windows` / `package-linux`、または単一 `packaging-distribution`） | packaging-distribution |
+| 本仕様 OWN | packaging ジョブ群（実装: `ci.yml` の `package-windows` / `package-linux`） | packaging-distribution |
+| 本仕様 OWN | リリース配布ワークフロー `release-packaging.yml`（`resolve-version` → `build-embedded-http-api` → `package-windows-installer` / `package-docker-image`、secret 欠落時は `require-embed-secrets` が失敗させる。Release 公開時、fail-closed、deb/rpm なし） | packaging-distribution |
 #### InstallDocs
 
 | Field | Detail |

@@ -43,7 +43,9 @@
 
 #### Acceptance Criteria
 
-1. When 利用者がコンソール上でヘルス確認を実行する, the Holter Analysis Assist Console UI shall 既存のヘルスエンドポイントへ問い合わせ、成功／失敗が判別できる結果を画面に示す
+1. While コンソール画面が開かれている, the Holter Analysis Assist Console UI shall 画面を開いた直後および以後一定間隔（10 秒）ごとに既存のヘルスエンドポイントへ自動で問い合わせ、成功／失敗が判別できる結果を画面に示す
+
+> **改訂メモ（2026-09-29）**: 初版の 2.1 は「When 利用者がコンソール上でヘルス確認を実行する」（利用者の操作を契機とする確認）だった。実装では専用ボタンを置かず、自動確認（開いた直後と 10 秒ごと、結果は画面右上に表示）としたため、契機の記述のみを改めた。計上なし（2.2）・失敗表示（2.3）は変わらない。
 2. The Holter Analysis Assist Console UI shall ヘルス確認のために独自のライセンス利用計上を行わない
 3. If ヘルス問い合わせが失敗する（到達不可・非成功応答等）, the Holter Analysis Assist Console UI shall 利用者が失敗を認識できるメッセージを日本語で表示する
 

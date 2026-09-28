@@ -82,6 +82,7 @@ cargo check --no-default-features   # cuda 機能なしでもビルドできる�
 ## 5. 注意点（これまでに踏んだもの）
 
 - **MSRV は 1.74**（`Cargo.toml` の `rust-version`）。clippy の `incompatible_msrv` で、`Option::is_none_or`（1.82）など新しい std API は `-D warnings` で落ちる。
+  - **更新（2026-09-29）**: `rust-version` は 1.88 に引き上げた（`ort 2.0.0-rc.13` が 1.88、clap 4.6 が 1.85 を要求）。1.88 までの std API は使える。`incompatible_msrv` の注意は 1.88 より新しい API について引き続き有効。
 - **`cargo fmt --check` は CI で必須**。以前のコミットで崩れていたので `32605e4` で揃えた。コミット前に必ず確認する。
 - **`tests/http_api_listen.rs`** は HTTP サーバーを実際に起動してポートを使う。以前は存在しないモデルパスを指していて 5 件失敗していたが、既定モデルを `tests/fixtures/phase2_tiny_dynamic.onnx` に変えて解消済み。
 - **cuda 機能の cfg 分岐**: CUDA EP 固有の API（`with_tf32` / `with_conv1d_pad_to_nc1d` / `with_cuda_graph`、IoBinding の CUDA アロケータ）は `#[cfg(feature = "cuda")]` で囲み、`--no-default-features` でもビルドできるようにする。

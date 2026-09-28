@@ -104,7 +104,7 @@ flowchart TB
 | Layer | Choice / Version | Role in Feature | Notes |
 |-------|------------------|-----------------|-------|
 | CLI | clap 4.x | モデルソース選択（パス任意化） | feature で既定値切替 |
-| Library | Rust 2021 / MSRV 1.74+ | `ModelSource`, 埋め込みロード | |
+| Library | Rust 2021 / MSRV 1.88（設計時は 1.74。`ort 2.0.0-rc.13` の要求で引き上げ） | `ModelSource`, 埋め込みロード | |
 | Inference | ort =2.0.0-rc.13 | `commit_from_memory` | 既存依存を拡張利用 |
 | Build | Cargo feature `embedded-model` + `build.rs` | モデル注入と欠落検出 | 環境変数でパス指定 |
 | CI | GitHub Actions 既存マトリクス | `release-embedded-cli`（注入・CLI release・サイズ計測） | packaging / `holter-http-api` ジョブは非所有 |
@@ -317,6 +317,7 @@ pub fn analyze_ecl_with_source(
 - 本関数が `ModelSource` 経由でモデルをロードし、解析パイプラインを実行する
 - パス専用の `analyze_ecl` / `analyze_ecl_with_limit` は `ModelSource::Path` へ委譲する **薄い互換ラッパ** とする（新規呼び出し側は正規入口を使う）
 - **ライセンス利用計上（meter）は本仕様の所有外**。本仕様は meter を実装・独占しない。`license-client` が `analyze_ecl_with_source` の先頭（または共有 gated 入口）へ meter 呼び出しを挿入する想定である。調整順: 本仕様が ModelSource 配線を先に入れ、その後 license がゲートを追加する
+- **実装メモ（2026-09-29）**: 現在の meter 位置は「先頭」ではない。`analyze_ecl_with_source` はまずモデルを `ModelSource` からロードし、`analyze_ecl_with_model`（HTTP の常駐モデル用）と共有する解析本体で ECL の読み込み・前処理を終えた後、最初の window 推論の直前に 1 回計上する。モデル不備・入力不備は計上前に失敗する（正本は license-client の design「AnalyzeEntryIntegration」）
 
 ##### Service Interface
 上記 `analyze_ecl_with_source` が正。既存 Path API はラッパとして残す。

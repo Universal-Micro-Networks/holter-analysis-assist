@@ -5,7 +5,7 @@
 - **Discovery Scope**: Extension（既存 lib / CLI 上に薄い HTTP 面を追加）
 - **Key Findings**:
   - 解析・モデル・ライセンスは lib 側にあり、HTTP はルーティング／シリアライズ／起動ライフサイクルのみを所有する
-  - プロジェクト MSRV 1.74 のため Axum は 0.7.x（0.7.9）を採用。Axum 0.8 系は MSRV 1.75+（最新は 1.80）で不適合
+  - プロジェクト MSRV 1.74 のため Axum は 0.7.x（0.7.9）を採用。Axum 0.8 系は MSRV 1.75+（最新は 1.80）で不適合（**改訂メモ 2026-09-29**: MSRV は 1.88 に上がり、この不採用理由は現在は成り立たない。下記「Axum バージョンと MSRV」参照）
   - 上流 `license-client` は blocking HTTP、Axum は async のため、解析とゲート呼び出しは `spawn_blocking` で橋渡しする
   - 推論計上は `analyze` 入口の既存ゲートに委譲し、HTTP 層で二重計上しない
 
@@ -28,6 +28,7 @@
   - Axum 0.7.9: MSRV 1.66 系で 1.74 と両立
   - Actix-web / Warp も候補だが、エコシステム・型安全ルーティング・メンテ観点で Axum が brief 推奨どおり最適
 - **Implications**: `axum = "0.7.9"`（互換範囲は 0.7）、`tokio` multi-thread、`tower-http` で body limit / timeout
+- **改訂メモ（2026-09-29）**: `Cargo.toml` の `rust-version` は 1.88 に引き上げられた（`ort 2.0.0-rc.13` が 1.88、clap 4.6 が 1.85 を要求するため）。これにより「MSRV 1.74 のため Axum 0.8 は不採用」という理由は現在は成り立たない。ただし axum は 0.7.9（tower-http 0.5）のまま動作しており、0.8 への移行は実施していない。移行する場合は別途判断する（API の破壊的変更を伴うため、Revalidation Trigger として扱う）
 
 ### 上流契約の整合
 - **Context**: `ModelSource` / `LicenseGate` / `[license]` ini を再定義しない
@@ -62,13 +63,14 @@
 - **Rationale**: MSRV 1.74 を壊さず、薄いアダプタに適する
 - **Trade-offs**: 0.8 の新 API は使えない。将来 MSRV 上げ時に 0.8 へ移行可能
 - **Follow-up**: 実装時に `cargo +1.74 check` 相当で解決を確認
+- **改訂メモ（2026-09-29）**: MSRV は 1.88 になり、0.8 を妨げていた MSRV 制約はなくなった。0.7.9 の継続は MSRV ではなく「動作中の実装を変えない」ための判断として扱う
 
 ### Decision: 計上は analyze 入口に一元化
 - **Context**: 二重計上リスク
 - **Alternatives Considered**:
   1. HTTP ハンドラでも `ensure_inference_allowed` を呼ぶ
   2. analyze 入口のみ（上流契約どおり）
-- **Selected Approach**: HTTP は meter を呼ばず、gated analyze エントリに委譲。起動ゲートのみ HTTP main が所有
+- **Selected Approach**: HTTP は meter を呼ばず、gated analyze エントリに委譲。起動ゲートのみ HTTP main が所有（実装では計上は `analyze_ecl_with_source` / `analyze_ecl_with_model` 共通の解析本体で、前処理後・推論直前に 1 回）
 - **Rationale**: 要件「1 リクエスト 1 回」と license-client 契約を一致させる
 - **Trade-offs**: analyze 非経由の将来エンドポイント追加時は再配線が必要
 - **Follow-up**: テストで meter 呼び出し回数 = 1 を検証
@@ -81,6 +83,7 @@
 - **Selected Approach**: `POST /v1/analyze` で multipart フィールド `ecl` を主経路。任意クエリ/フォームで `format`（既定 csv）、`provider`、`max_windows`
 - **Rationale**: ファイル名付きアップロードと将来拡張が容易
 - **Trade-offs**: クライアントは multipart 必須。文書化で補う
+- **実装メモ（2026-09-29）**: `provider` / `max_windows` は multipart フィールドのみ。`format` は multipart フィールドとクエリ `?format=` の両方で受け付け、優先順位は multipart `format` > クエリ `format` > `Accept` ヘッダ > 既定 CSV。`csv` / `json` 以外の値はどちらの経路でも 400 `invalid_input`
 
 ### Decision: `[http]` ini セクション追加
 - **Context**: リッスン・サイズ・タイムアウト・開発用 model_path

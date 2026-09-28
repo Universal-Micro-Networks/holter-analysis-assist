@@ -78,6 +78,7 @@
 - **Rationale**: 後方互換（Req 6.2）と段階導入。
 - **Trade-offs**: 旧モデルでは高速化されないが、警告で気づける。
 - **Follow-up**: 再エクスポート時に Keras と ORT（バッチ N）の数値一致を確認。
+- **実装後メモ（2026-09-29）**: 本番の `phase2_rev1.onnx` は引き続き固定バッチ 1 で、既定 `batch_size=16` は効かない（実効 1 件＋警告）。Windows で可変バッチ版 `phase2_rev1_dynamic.onnx` を再エクスポート済み（`--verify-batch 4` で Keras との最大差 7.5e-5、バッチ 16 とバッチ 1 の最大差 2.4e-7。メタデータは `resources/models/phase2_rev1_dynamic.onnx.json`、ONNX 本体は Git 管理外）。まとめ推論を使うにはこのモデルを明示指定する（配布用の埋め込みモデルは CI secret で供給されるため、どちらを埋め込むかはリポジトリ外の運用で決まる）。
 
 ### Decision: 三値のチューニング設定
 - **Context**: Req 4.2（未指定なら導入前と同等）。

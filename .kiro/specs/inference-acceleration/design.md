@@ -6,6 +6,8 @@
 **Users**: 解析オペレータ（CLI `analyze-ecl`）、連携システム運用者（HTTP API / UI コンソール）、品質責任者（比較レポート）。
 **Impact**: 現在の「20 秒ウィンドウを 1 件ずつ推論」「CUDA 設定は既定のまま」「計測なし」を、「複数ウィンドウのまとめ推論」「三値の CUDA チューニング」「段階別計測」「HTTP 起動時暖機」「CPU FP32 基準の比較サブコマンド」に置き換える。出力契約（CSV / JSON）とライセンス計上単位は変えない。
 
+**実装後メモ（2026-09-29）**: 全タスク実装済み。運用上の注意として、本番モデル `phase2_rev1.onnx` は固定バッチ 1 のため、既定 `batch_size=16` は BatchPlan により実効 1 件に丸められ（警告付き）、まとめ推論の効果は出ない。効果を得るには `export_onnx.py --dynamic-batch` で再エクスポートした可変バッチ版 `phase2_rev1_dynamic.onnx`（メタデータ `resources/models/phase2_rev1_dynamic.onnx.json`、入力 `[null, 10000, 1]`。ONNX 本体は Git 管理外）を `--model` / `[http] model_path` で指定する。RTX 4080 での速度実測は `docs/perf/windows-gpu-benchmark.md`（まとめ件数 8 で頭打ち、32 では低下）。GPU 実機での `compare-accel` による精度検証の記録（同手順書の記録表）は未記入で、手動作業として残る。
+
 ### Goals
 - 段階別所要時間・実効設定を 1 行の診断ログとして CLI / HTTP の両方で出す
 - 可変バッチモデルで 1 回の推論に複数ウィンドウを載せ、旧固定バッチモデルでも従来どおり動く

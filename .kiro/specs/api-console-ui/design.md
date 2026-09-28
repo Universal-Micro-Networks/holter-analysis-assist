@@ -6,7 +6,9 @@
 
 **Purpose**: curl／専用クライアントなしの導入検証と簡易運用を可能にする。  
 **Users**: 検査会社の導入担当者・運用オペレータ。  
-**Impact**: Axum ルータに静的配信ルートを追加し、ビルド時に HTML／最小 CSS／JS を埋め込む。解析・ライセンス・HTTP API 契約は上流のまま消費する。
+**Impact**: Axum ルータに静的配信ルートを追加し、ビルド時に HTML／CSS（リポジトリに同梱した Bulma + 独自の最小 CSS）／JS を埋め込む。解析・ライセンス・HTTP API 契約は上流のまま消費する。
+
+**実装同期（2026-09-29）**: (1) レイアウトとフォームに Bulma 1.0.2（CSS のみ。MIT）を使う。`static/console/vendor/bulma.min.css` に同梱してバイナリへ埋め込み、実行時に CDN など外部リソースを読まない。JS フレームワークは使わない（research.md の決定参照）。(2) ヘルス確認はボタン操作ではなく、画面を開いた直後と以後 10 秒ごとの自動確認とし、結果を画面右上に表示する（requirements 2.1 の改訂メモ参照）。(3) 出力形式の既定は JSON で、コンソールは multipart `format` と `Accept` を常に明示して送る。
 
 ### Goals
 - `/ui/` 配下で操作可能な日本語コンソールを配信する
@@ -23,7 +25,7 @@
 ## Boundary Commitments
 
 ### This Spec Owns
-- コンソール静的アセット（HTML + 最小 CSS/JS、日本語文言）
+- コンソール静的アセット（HTML + CSS/JS、日本語文言。同梱した Bulma CSS とそのライセンス文書を含む）
 - ビルド時埋め込み（`rust-embed`）と静的配信ハンドラ
 - UI 配信ルート（正本 `/ui/`、任意で `/` → `/ui/` リダイレクト）
 - ブラウザ側からの既存 API 呼び出しロジック（クライアントのみ）
@@ -87,7 +89,7 @@ graph TB
 
 | Layer | Choice / Version | Role in Feature | Notes |
 |-------|------------------|-----------------|-------|
-| UI | HTML + 最小 CSS/JS（フレームワークなし） | コンソール画面 | SPA／Node ビルドなし |
+| UI | HTML + 素の JS（JS フレームワークなし）+ Bulma 1.0.2 CSS（CSS のみ）+ 独自の最小 CSS | コンソール画面 | SPA／Node ビルドなし。Bulma は `static/console/vendor/` に同梱して埋め込み、実行時の外部リソース（CDN）なし |
 | Embed | rust-embed 8.x | アセットをバイナリへ同梱 | 開発時は fs 読取可 |
 | MIME | mime_guess（任意） | Content-Type | 公式例と同型 |
 | HTTP | Axum 0.7.9（既存） | ルート配信 | 契約変更なし |
@@ -100,9 +102,12 @@ graph TB
 ### Directory Structure
 ```
 static/console/
-├── index.html          # 日本語コンソール（案内・フォーム・結果領域）
-├── console.css         # 最小スタイル
-└── console.js          # health / analyze / 表示・DL・エラー・処理中
+├── index.html          # 日本語コンソール（案内・フォーム・結果領域。左 1/3 入力・右 2/3 出力）
+├── console.css         # 独自の最小スタイル（Bulma の上書き）
+├── console.js          # health 自動確認 / analyze / 表示・DL・エラー・処理中・経過時間
+└── vendor/
+    ├── bulma.min.css   # Bulma 1.0.2（CSS のみ）。相対パスで読み込む
+    └── bulma.LICENSE   # Bulma の MIT ライセンス
 
 src/http/
 ├── assets.rs           # rust-embed: folder = "static/console"
@@ -139,9 +144,10 @@ sequenceDiagram
   U->>B: open /ui/
   B->>S: GET /ui/
   S-->>B: index.html and assets
-  U->>B: health check
-  B->>H: GET /health
-  H-->>B: 200 status ok
+  loop on open and every 10s
+    B->>H: GET /health
+    H-->>B: 200 status ok
+  end
   U->>B: select ECL and analyze
   B->>A: POST /v1/analyze multipart ecl
   A-->>B: 200 CSV or JSON
@@ -161,7 +167,7 @@ sequenceDiagram
 | 1.1 | コンソール配信 | StaticUiHandler, Assets | GET `/ui/` | open UI |
 | 1.2 | 同一プロセス配信 | Assets, routes | embed | — |
 | 1.3 | 経路の区別 | routes | `/ui/` vs `/health` `/v1/analyze` | — |
-| 2.1–2.3 | ヘルス確認 | ConsoleClient, HealthHandler | GET `/health` | health |
+| 2.1–2.3 | ヘルス確認（自動、10 秒ごと） | ConsoleClient, HealthHandler | GET `/health` | health |
 | 3.1–3.4 | アップロード／解析 | ConsoleClient, AnalyzeHandler | POST `/v1/analyze` | analyze |
 | 4.1–4.4 | 結果表示／DL | ConsoleClient | blob download | analyze success |
 | 5.1–5.3 | エラー表示 | ConsoleClient | error UI | analyze fail |
@@ -193,6 +199,7 @@ sequenceDiagram
 **Responsibilities & Constraints**
 - `#[folder = "static/console"]`（パスは実装で固定し文書化）
 - release ではバイナリ内、debug では crate 既定の開発時読取でよい
+- `vendor/`（Bulma CSS とライセンス文書）もフォルダごと埋め込まれ、`/ui/vendor/...` で配信される
 - SPA バンドルや node_modules を含めない
 
 **Dependencies**
@@ -255,10 +262,10 @@ sequenceDiagram
 | Requirements | 2.1–2.3, 3.1–3.4, 4.1–4.4, 5.1–5.3, 6.1, 7.1–7.2, 8.1–8.2, 10.x |
 
 **Responsibilities & Constraints**
-- ヘルス: `GET /health`。成功／失敗を日本語表示。計上なし
-- 解析: `POST /v1/analyze`、multipart フィールド名 `ecl`（必須）。任意で `format=json|csv`（上流契約。既定は上流に従う）
+- ヘルス: 画面を開いた直後と以後 10 秒ごとに `GET /health` を自動で呼ぶ（専用ボタンなし。前回の問い合わせが終わっていなければ飛ばす）。結果（確認中／正常／異常／未到達）を画面右上に日本語で表示。解析中の処理中表示とは独立。計上なし
+- 解析: `POST /v1/analyze`、multipart フィールド名 `ecl`（必須）。出力形式は画面で選び（既定 JSON）、multipart の `format` と対応する `Accept` ヘッダを常に明示して送る（上流の既定 CSV には依存しない）
 - 未選択時は送信しない
-- 処理中表示を出す
+- 処理中表示と経過時間（完了・失敗時は処理時間）を出す
 - 成功時: 本文を画面表示し、ダウンロード（Blob + `a[download]`）を提供
 - 失敗時: 日本語メッセージ。可能なら応答本文の識別情報を併記
 - 臨床 UI／認証／課金画面を持たない
@@ -272,10 +279,10 @@ sequenceDiagram
 | Method | Endpoint | Request | Response | Notes |
 |--------|----------|---------|----------|-------|
 | GET | `/health` | なし | `{ "status": "ok" }` | http-api OWN |
-| POST | `/v1/analyze` | multipart `ecl`; optional `format` | CSV or JSON | http-api OWN |
+| POST | `/v1/analyze` | multipart `ecl` + `format`（コンソールは常に送る）、`Accept` | CSV or JSON | http-api OWN |
 
 ##### Implementation Notes
-- Integration: 相対 URL のみ（別オリジン想定なし）
+- Integration: 相対 URL のみ（別オリジン想定なし）。CSS も相対パス（`vendor/bulma.min.css`, `console.css`）で、外部 URL を参照しない
 - Validation: クライアント側はファイル有無の最小チェックのみ。サイズ／タイムアウトは上流
 - Risks: 巨大 JSON の DOM 表示が重い → 表示は要約／先頭制限してよいがダウンロードは全文
 
@@ -306,7 +313,8 @@ sequenceDiagram
 - busy: boolean
 - lastResult: { kind: "json" \| "csv" \| "text", body: string } | null
 - lastError: string | null
-- healthStatus: "unknown" \| "ok" \| "error"
+- healthStatus: "pending" \| "ok" \| "error"（自動確認のたびに更新）
+- healthInFlight: boolean（自動確認の重複防止）
 
 ### Data Contracts & Integration
 - 解析／ヘルスのペイロードは http-api 正本。本仕様はスキーマを複製定義しない
@@ -322,7 +330,7 @@ sequenceDiagram
 | 状況 | UI 表示 |
 |------|---------|
 | ファイル未選択 | 日本語の入力不足 |
-| `/health` 失敗 | 疎通失敗（詳細任意） |
+| `/health` 失敗（自動確認） | 画面右上に異常（HTTP ステータス）／応答異常／未到達 |
 | analyze 4xx/5xx | 解析失敗＋可能なら error コード／メッセージ |
 | タイムアウト／ネットワーク | 到達不可／タイムアウト |
 
@@ -340,7 +348,8 @@ sequenceDiagram
 - `/` リダイレクト（採用時）が `/ui/` を指す
 
 ### E2E / Manual
-- ブラウザでヘルス成功表示
+- ブラウザで画面右上のヘルス表示が自動で正常になる（サーバー停止で 10 秒以内に異常表示へ変わる）
+- ブラウザの開発者ツールで外部オリジンへのリクエストがない（Bulma を含め `/ui/` 配下のみ）
 - 小 ECL（またはフィクスチャ）で解析成功→表示→ダウンロード
 - 故意の失敗（空ファイル／未選択）で日本語エラー
 
@@ -355,7 +364,8 @@ sequenceDiagram
 - 認証製品化はしない（公開 LAN 前提は上流運用に従う）
 
 ## Performance & Scalability
-- アセットは数ファイル・小サイズ。CDN 不要
+- アセットは数ファイル。同梱の Bulma を含めてすべてバイナリに埋め込み、CDN など実行時の外部リソースを使わない（閉域網でも表示が崩れない）
+- ヘルス自動確認は 10 秒間隔の軽い GET のみ（計上なし）
 - 巨大解析結果の画面描画は制限してよいが DL は全文
 - 上限・タイムアウトは `[http]` に委譲（8.1）
 

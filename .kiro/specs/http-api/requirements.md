@@ -4,6 +4,8 @@
 
 本仕様は、ホルター解析支援アプリケーション（Holter Analysis Assist）に HTTP による解析面を追加し、クラウド連携や他システムから ECL 入力に対する解析を呼べるようにする。解析品質・埋め込みモデル利用・ライセンスゲートは CLI と同一コアを共有し、起動時は `LicenseGate::install` と有効性確認に失敗した場合はサーバーを起動しない。各解析リクエストでは正本入口 `analyze_ecl_with_source` 内で許可確認・利用計上を 1 回行う（HTTP は meter を直接呼ばない。ONNX window 単位ではない）。ライセンスサーバー本体、配布パッケージ本体、本格的な利用者認証（IAM / OAuth）は本仕様の範囲外とする。
 
+**実装メモ（2026-09-29）:** 実装ではモデルを起動時に常駐させ、通常のリクエストは `analyze_ecl_with_model` を呼ぶ（provider 上書き時は `analyze_ecl_with_source`）。両者は同じ解析本体を通り、許可確認・利用計上はその中で前処理後・推論直前に 1 回だけ行われるため、本書の「正本入口 `analyze_ecl_with_source` を呼ぶ」「1 リクエスト 1 回」の意図（HTTP 層で計上しない、二重計上しない）は保たれている。詳細は design.md。
+
 ## Boundary Context
 
 - **In scope**:

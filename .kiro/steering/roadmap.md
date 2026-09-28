@@ -62,7 +62,13 @@
 
 ### Phase 3 — 推論高速化
 
-- [ ] inference-acceleration -- 段階別計測・ウィンドウまとめ処理・HTTP モデル常駐/暖機・CUDA チューニング・CPU FP32 基準の精度/速度比較レポート（TensorRT / FP16 は範囲外）。Dependencies: model-embedding, http-api
+- [x] inference-acceleration -- 段階別計測・ウィンドウまとめ処理・HTTP モデル常駐/暖機・CUDA チューニング・CPU FP32 基準の精度/速度比較レポート（TensorRT / FP16 は範囲外）。Dependencies: model-embedding, http-api
+  - 残作業（手動）: GPU 実機での `compare-accel` による精度検証の記録（`docs/perf/windows-gpu-benchmark.md` の記録表は未記入。速度の実測メモのみ）
+  - 注意: 本番 `phase2_rev1.onnx` は固定バッチ 1 のため既定 `batch_size=16` は効かない。まとめ推論の効果は可変バッチ版（`phase2_rev1_dynamic.onnx`。メタデータ `resources/models/phase2_rev1_dynamic.onnx.json`）で得られる
+
+## Implemented Without Spec Flow
+
+- [x] runtime-ep-selection -- `ExecutionProviderKind`（`auto` / `cpu` / `cuda`。ini / HTTP では `gpu` / `nvidia` も `cuda` の別名）、`auto` 時の CUDA → CPU フォールバック、`cuda` feature 既定 on、CoreML EP 除去。requirements / design / tasks を作らず直接実装（`.kiro/specs/runtime-ep-selection/brief.md` のみ）
 
 ## Existing Spec Updates
 

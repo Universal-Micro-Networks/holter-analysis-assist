@@ -116,7 +116,7 @@ graph TB
 | Layer | Choice / Version | Role in Feature | Notes |
 |-------|------------------|-----------------|-------|
 | CLI | clap 既存 | 起動ゲート呼び出し | 変更なし |
-| Library | Rust 2021 / MSRV 1.74 | ゲート・設定・クライアント | |
+| Library | Rust 2021 / MSRV 1.88 | ゲート・設定・クライアント | 設計時は 1.74。`ort 2.0.0-rc.13` の要求で 1.88 に引き上げ |
 | HTTP client | reqwest 0.12 blocking + json + rustls-tls | ライセンスサーバー呼出 | 既存。本文なし POST と `Authorization: Bearer` |
 | Config | rust-ini 0.21 | ini 読取 | 既存 |
 | Errors | thiserror 既存 | 起動失敗 / 推論拒否 + 理由区分 | |
