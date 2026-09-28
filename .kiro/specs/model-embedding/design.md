@@ -372,6 +372,8 @@ pub fn analyze_ecl_with_source(
 - Output: `holter-analysis-assist`（+ `.exe`）artifact とサイズログ
 - Constraint: artifact パスに `.onnx` 等の生モデルを含めない
 - Measurement: release バイナリのバイトサイズをログ（および可能なら artifact メタ）に出力。100MB 超でも抑制しない
+- Size diff（5.3）: 同じターゲット・`--no-default-features` で埋め込みなしのビルドを先に行ってサイズを控え、埋め込みビルド後に「埋め込みあり / なし / 差分」をログとジョブサマリーに出す（両ビルドの出力先が同じため、埋め込みなしを先に行う）
+- Gate: ジョブの `if:` では `secrets` を参照できない（ワークフロー全体が無効になる）。シークレットの有無は判定ジョブ `embed-secrets` が出力 `present` として返し、本ジョブは `needs.embed-secrets.outputs.present == 'true'` のときだけ実行する
 - **非所有**: packaging ジョブ、および `holter-http-api` の埋め込み成果物／その CI（`http-api` / `packaging-distribution` が OWN）
 
 ## Cross-spec contracts

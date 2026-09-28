@@ -7,7 +7,7 @@
 # - Win + Linux x86_64 matrix
 # - Production-size inject via HOLTER_EMBEDDED_MODEL_URL (curl download; optional AUTH header)
 # - Secondary fixture path via HOLTER_EMBEDDED_MODEL_B64 (dev only; GH secret ~48KB limit)
-# - Job if: runs when URL OR B64 is non-empty (soft-skip when neither set)
+# - Runs only when the embed-secrets gate reports URL OR B64 (soft-skip when neither set)
 # - release build: --bin holter-http-api --no-default-features --features embedded-model
 # - binary size logging
 # - artifact named release-embedded-http-api* uploading holter-http-api only (no .onnx)
@@ -69,22 +69,35 @@ if ! echo "$JOB_BLOCK" | grep -Eiq '48KB|48 KiB|~48|secret.*size|size limit|GitH
 fi
 pass "secondary B64 fixture path retained with size-limit documentation"
 
-# Soft-skip: job if runs when URL OR B64 non-empty
-if ! echo "$JOB_BLOCK" | grep -F "secrets.HOLTER_EMBEDDED_MODEL_URL" | grep -q "!="; then
-  fail "job if: must gate on secrets.HOLTER_EMBEDDED_MODEL_URL != ''"
+# Soft-skip: a job-level if: cannot read the secrets context (GitHub rejects the
+# whole workflow), so the embed-secrets gate job detects URL OR B64 and the job
+# runs only when its output says the secrets are present.
+if echo "$JOB_BLOCK" | grep -E '^[[:space:]]*if:' | grep -Eq '(^|[^-[:alnum:]_])secrets\.'; then
+  fail "job if: must not reference the secrets context (workflow would be invalid)"
 fi
-if ! echo "$JOB_BLOCK" | grep -F "secrets.HOLTER_EMBEDDED_MODEL_B64" | grep -q "!="; then
-  fail "job if: must gate on secrets.HOLTER_EMBEDDED_MODEL_B64 != ''"
-fi
+GATE_BLOCK="$(
+  awk '
+    /^  embed-secrets:/ { grab=1 }
+    grab && /^  [a-zA-Z0-9_-]+:/ && !/^  embed-secrets:/ { exit }
+    grab { print }
+  ' "$WF"
+)"
+[[ -n "$GATE_BLOCK" ]] || fail "gate job 'embed-secrets' not found in $WF"
+echo "$GATE_BLOCK" | grep -Fq 'secrets.HOLTER_EMBEDDED_MODEL_URL' \
+  || fail "embed-secrets must read secrets.HOLTER_EMBEDDED_MODEL_URL"
+echo "$GATE_BLOCK" | grep -Fq 'secrets.HOLTER_EMBEDDED_MODEL_B64' \
+  || fail "embed-secrets must read secrets.HOLTER_EMBEDDED_MODEL_B64"
+echo "$GATE_BLOCK" | grep -Eq -- '-n "\$\{HOLTER_EMBEDDED_MODEL_URL:-\}" \|\| -n "\$\{HOLTER_EMBEDDED_MODEL_B64:-\}"' \
+  || fail "embed-secrets must report present when URL OR B64 is non-empty"
+echo "$GATE_BLOCK" | grep -Fq 'present: ${{ steps.detect.outputs.present }}' \
+  || fail "embed-secrets must expose outputs.present"
+echo "$JOB_BLOCK" | grep -Eq '^[[:space:]]*needs:.*embed-secrets' \
+  || fail "job must needs: embed-secrets"
 JOB_IF_LINE="$(echo "$JOB_BLOCK" | grep -E '^[[:space:]]*if:' | head -n1 || true)"
 [[ -n "$JOB_IF_LINE" ]] || fail "job must have an if: condition for soft-skip"
-echo "$JOB_IF_LINE" | grep -Fq 'HOLTER_EMBEDDED_MODEL_URL' \
-  || fail "job if: must include HOLTER_EMBEDDED_MODEL_URL"
-echo "$JOB_IF_LINE" | grep -Fq 'HOLTER_EMBEDDED_MODEL_B64' \
-  || fail "job if: must include HOLTER_EMBEDDED_MODEL_B64"
-echo "$JOB_IF_LINE" | grep -Eq '\|\||or' \
-  || fail "job if: must OR URL and B64 (run when either is non-empty)"
-pass "job if: runs when URL OR B64 non-empty (soft-skip when neither)"
+echo "$JOB_IF_LINE" | grep -Fq "needs.embed-secrets.outputs.present == 'true'" \
+  || fail "job if: must gate on needs.embed-secrets.outputs.present == 'true'"
+pass "job runs only when embed-secrets reports URL OR B64 (soft-skip when neither)"
 
 echo "$JOB_BLOCK" | grep -q 'HOLTER_EMBEDDED_MODEL_PATH' \
   || fail "must set HOLTER_EMBEDDED_MODEL_PATH for build.rs inject"

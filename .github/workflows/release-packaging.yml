@@ -75,14 +75,35 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Using release tag=${TAG} version=${VER}"
 
+  # Job-level if: cannot read the secrets context (the whole workflow is rejected),
+  # so presence of the embed inject secrets is detected here and exposed as an output.
+  embed-secrets:
+    name: embed-secrets
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.detect.outputs.present }}
+    steps:
+      - name: Detect embed inject secrets (URL OR B64)
+        id: detect
+        shell: bash
+        env:
+          HOLTER_EMBEDDED_MODEL_URL: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL }}
+          HOLTER_EMBEDDED_MODEL_B64: ${{ secrets.HOLTER_EMBEDDED_MODEL_B64 }}
+        run: |
+          if [[ -n "${HOLTER_EMBEDDED_MODEL_URL:-}" || -n "${HOLTER_EMBEDDED_MODEL_B64:-}" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ---------------------------------------------------------------------------
   # Build embedded holter-http-api for Win + Linux (CPU). Required for packaging.
   # ---------------------------------------------------------------------------
   build-embedded-http-api:
     name: build-embedded-http-api (${{ matrix.target }})
-    needs: resolve-version
+    needs: [resolve-version, embed-secrets]
     # Fail-closed when embed inject secrets are absent (release must not soft-skip).
-    if: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL != '' || secrets.HOLTER_EMBEDDED_MODEL_B64 != '' }}
+    if: ${{ needs.embed-secrets.outputs.present == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -186,8 +207,8 @@ jobs:
   # Guard: surface a clear failure when embed secrets are not configured.
   require-embed-secrets:
     name: require-embed-secrets
-    needs: resolve-version
-    if: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL == '' && secrets.HOLTER_EMBEDDED_MODEL_B64 == '' }}
+    needs: [resolve-version, embed-secrets]
+    if: ${{ needs.embed-secrets.outputs.present != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Fail — embed secrets required for release packaging

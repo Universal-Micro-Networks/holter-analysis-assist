@@ -520,7 +520,8 @@ GitHub Actions（`.github/workflows/ci.yml`）で Linux / Windows の
 | ジョブ | 内容 |
 |---|---|
 | `build-test` | fmt / clippy / test / release ビルド、CLI バイナリのアップロード |
-| `release-embedded-cli` / `release-embedded-http-api` | モデル埋め込み・CPU の CLI / `holter-http-api`（Linux / Windows） |
+| `embed-secrets` | 埋め込み用シークレット（`URL` または `B64`）が設定されているかを判定する。後続の埋め込みジョブはこの結果で実行・スキップが決まる（ジョブの `if:` からはシークレットを直接参照できないため） |
+| `release-embedded-cli` / `release-embedded-http-api` | モデル埋め込み・CPU の CLI / `holter-http-api`（Linux / Windows）。CLI は埋め込みなしのビルドとのサイズ差分もログとジョブサマリーに出す |
 | `package-windows` / `package-linux` | `release-embedded-http-api` から Windows インストーラ、Docker イメージ（`docker save` アーカイブ）、deb / rpm を作成 |
 
 `URL` / `B64` のどちらも未設定なら埋め込み・パッケージングのジョブはスキップされます（CI は失敗しません）。

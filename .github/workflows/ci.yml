@@ -62,6 +62,28 @@ jobs:
           name: holter-analysis-assist-windows-x86_64
           path: target/${{ matrix.target }}/release/holter-analysis-assist.exe
 
+  # Job-level if: cannot read the secrets context (the whole workflow is rejected),
+  # so presence of the embed inject secrets is detected here and exposed as an output.
+  embed-secrets:
+    name: embed-secrets
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.detect.outputs.present }}
+    steps:
+      - name: Detect embed inject secrets (URL OR B64)
+        id: detect
+        shell: bash
+        env:
+          HOLTER_EMBEDDED_MODEL_URL: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL }}
+          HOLTER_EMBEDDED_MODEL_B64: ${{ secrets.HOLTER_EMBEDDED_MODEL_B64 }}
+        run: |
+          if [[ -n "${HOLTER_EMBEDDED_MODEL_URL:-}" || -n "${HOLTER_EMBEDDED_MODEL_B64:-}" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Neither HOLTER_EMBEDDED_MODEL_URL nor HOLTER_EMBEDDED_MODEL_B64 is set; embedded release jobs soft-skip."
+          fi
+
   # ---------------------------------------------------------------------------
   # CiEmbedRelease (model-embedding): embedded CLI release for Win/Linux x86_64.
   #
@@ -81,8 +103,9 @@ jobs:
   # ---------------------------------------------------------------------------
   release-embedded-cli:
     name: release-embedded-cli (${{ matrix.target }})
+    needs: embed-secrets
     # Soft-skip when neither inject secret is configured (keeps CI green).
-    if: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL != '' || secrets.HOLTER_EMBEDDED_MODEL_B64 != '' }}
+    if: ${{ needs.embed-secrets.outputs.present == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -107,6 +130,21 @@ jobs:
         with:
           key: embed-${{ matrix.target }}
 
+      - name: Release build without embedded model (size baseline)
+        # Same target and features minus embedded-model; runs before the embedded
+        # build because both write the same output path.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --target ${{ matrix.target }} --no-default-features
+          BIN="target/${{ matrix.target }}/release/holter-analysis-assist"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            BIN="${BIN}.exe"
+          fi
+          BASE_SIZE=$(wc -c < "$BIN" | tr -d ' ')
+          echo "non-embedded baseline binary size: ${BASE_SIZE} bytes"
+          echo "HOLTER_NON_EMBEDDED_SIZE=${BASE_SIZE}" >> "$GITHUB_ENV"
+
       - name: Materialize model for embed inject
         shell: bash
         env:
@@ -116,10 +154,10 @@ jobs:
         run: |
           set -euo pipefail
           # Soft-skip documentation: when neither URL nor B64 is set at the repo
-          # level, the job-level if: skips this job entirely (CI stays green).
+          # level, the embed-secrets gate skips this job entirely (CI stays green).
           echo "Inject policy: primary=HOLTER_EMBEDDED_MODEL_URL (production-size);"
           echo "  secondary=HOLTER_EMBEDDED_MODEL_B64 (dev/fixture only, GH secret max ~48KB)."
-          echo "  Soft-skip when neither secret is set (job if: URL OR B64)."
+          echo "  Soft-skip when neither secret is set (embed-secrets gate: URL OR B64)."
 
           MODEL_DIR="${RUNNER_TEMP}/holter-embed-model"
           mkdir -p "$MODEL_DIR"
@@ -150,7 +188,7 @@ jobs:
           '
           else
             echo "Neither HOLTER_EMBEDDED_MODEL_URL nor HOLTER_EMBEDDED_MODEL_B64 is set;"
-            echo "soft-skip expected at job if: — failing closed if reached."
+            echo "soft-skip expected at the embed-secrets gate — failing closed if reached."
             exit 1
           fi
 
@@ -181,6 +219,18 @@ jobs:
           if (( SIZE > 104857600 )); then
             echo "note: binary exceeds 100MiB (${SIZE} bytes); recorded without suppression"
           fi
+          BASE_SIZE="${HOLTER_NON_EMBEDDED_SIZE}"
+          DIFF=$(( SIZE - BASE_SIZE ))
+          echo "embed size diff (${{ matrix.target }}, --no-default-features): embedded=${SIZE} non_embedded=${BASE_SIZE} diff=${DIFF} bytes"
+          {
+            echo "### release-embedded-cli size (${{ matrix.target }})"
+            echo ""
+            echo "| build | bytes |"
+            echo "|---|---|"
+            echo "| non-embedded (\`--no-default-features\`) | ${BASE_SIZE} |"
+            echo "| embedded (\`--no-default-features --features embedded-model\`) | ${SIZE} |"
+            echo "| diff | ${DIFF} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload embedded CLI (Linux)
         if: runner.os == 'Linux'
@@ -214,8 +264,9 @@ jobs:
     # does not redefine release-embedded-cli (model-embedding OWN).
     # -------------------------------------------------------------------------
     name: release-embedded-http-api (${{ matrix.target }})
+    needs: embed-secrets
     # Soft-skip when neither inject secret is configured (keeps CI green).
-    if: ${{ secrets.HOLTER_EMBEDDED_MODEL_URL != '' || secrets.HOLTER_EMBEDDED_MODEL_B64 != '' }}
+    if: ${{ needs.embed-secrets.outputs.present == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -249,10 +300,10 @@ jobs:
         run: |
           set -euo pipefail
           # Soft-skip documentation: when neither URL nor B64 is set at the repo
-          # level, the job-level if: skips this job entirely (CI stays green).
+          # level, the embed-secrets gate skips this job entirely (CI stays green).
           echo "Inject policy: primary=HOLTER_EMBEDDED_MODEL_URL (production-size);"
           echo "  secondary=HOLTER_EMBEDDED_MODEL_B64 (dev/fixture only, GH secret max ~48KB)."
-          echo "  Soft-skip when neither secret is set (job if: URL OR B64)."
+          echo "  Soft-skip when neither secret is set (embed-secrets gate: URL OR B64)."
 
           MODEL_DIR="${RUNNER_TEMP}/holter-embed-model"
           mkdir -p "$MODEL_DIR"
@@ -283,7 +334,7 @@ jobs:
           '
           else
             echo "Neither HOLTER_EMBEDDED_MODEL_URL nor HOLTER_EMBEDDED_MODEL_B64 is set;"
-            echo "soft-skip expected at job if: — failing closed if reached."
+            echo "soft-skip expected at the embed-secrets gate — failing closed if reached."
             exit 1
           fi
 
