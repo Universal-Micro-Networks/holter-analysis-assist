@@ -51,7 +51,10 @@ cleanup() {
 trap cleanup EXIT
 
 start_mock_license_server() {
-  # Tiny allow-all mock: POST any path → {"allowed":true} (matches cli_model_select / cli_license_startup).
+  # Tiny allow-all mock speaking the finalized license contract (same as tests/common/license_mock.rs):
+  #   POST /v1/licenses/verify → 200 {"ok":true,"data":{"valid":true,...}} (monthly_limit 0 = unlimited)
+  #   POST /v1/usage           → 201 {"ok":true,"data":{"allowed":true,...}}
+  #   missing Bearer → 401 license_invalid; other paths → 404.
   # Write script to disk first — `python <<'PY' &` can race and never consume the heredoc.
   # Bypass HTTPServer.server_bind's socket.getfqdn() — reverse DNS on 127.0.0.1 can hang
   # indefinitely in some agent/CI environments (Python 3.x BaseServer).
@@ -63,7 +66,26 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 port_file = sys.argv[1]
-body = json.dumps({"allowed": True}).encode("utf-8")
+
+VERIFY_BODY = {"ok": True, "data": {"valid": True, "monthly_limit": 0, "status": "active"}}
+USAGE_BODY = {
+    "ok": True,
+    "data": {
+        "allowed": True,
+        "used": 1,
+        "monthly_limit": 0,
+        "remaining": None,
+        "period": {
+            "start": "2026-09-30T15:00:00Z",
+            "end": "2026-10-31T15:00:00Z",
+            "timezone": "Asia/Tokyo",
+        },
+    },
+}
+ROUTES = {
+    "/v1/licenses/verify": (200, VERIFY_BODY),
+    "/v1/usage": (201, USAGE_BODY),
+}
 
 
 class NoDnsHTTPServer(HTTPServer):
@@ -82,7 +104,18 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length:
             self.rfile.read(length)
-        self.send_response(200)
+        path = self.path.split("?", 1)[0]
+        if not self.headers.get("Authorization", "").startswith("Bearer "):
+            status, payload = 401, {
+                "ok": False,
+                "error": {"code": "license_invalid", "message": "The license key is not valid."},
+            }
+        elif path in ROUTES:
+            status, payload = ROUTES[path]
+        else:
+            status, payload = 404, {"ok": False, "error": {"code": "not_found", "message": "Not found."}}
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")

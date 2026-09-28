@@ -36,8 +36,9 @@ Holter HTTP API を Windows 向けインストーラで導入する手順です�
 1. `{app}\http.ini.example` をコピーし、実行時設定ファイルを用意する（例: `{app}\config\http.ini`）
 2. 少なくとも次を編集する
    - `[license]` の **`server_url`** … ライセンスサーバー URL（正本: 上流 `config/license.ini.example`）
+   - `[license]` の **`license_key`** … 発行されたライセンスキー（正本: 上流 `config/license.ini.example`）
    - `[http]` の **`bind`** … リッスン指定（例: `0.0.0.0:8080`。正本: 上流 `config/http.ini.example`）
-3. 必要に応じて上流 example のコメントに従い `api_key` 等を設定する（キー意味は再定義しない）
+3. 必要に応じて上流 example のコメントに従い任意項目（`timeout_secs` 等）を設定する（キー意味は再定義しない）
 
 ## NOTICE の所在
 

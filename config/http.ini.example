@@ -9,7 +9,7 @@
 #   2. Keep separate files and pass each path to the HTTP / license loaders.
 # The `holter-http-api` binary expects one `--config` / HOLTER_HTTP_INI file that
 # contains both [http] and [license] (option 1). Default path: config/http.ini.
-# Do not invent alternate license key names (server_url, api_key, etc.).
+# Do not invent alternate license key names (server_url, license_key, etc.).
 #
 # TLS / transport:
 #   This service listens plain HTTP (bind host:port). Terminate TLS at a reverse

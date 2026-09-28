@@ -31,8 +31,8 @@ mkdir -p "${OUT_DIR}"
 # Key names and meanings are NOT owned here — copied from upstream:
 #   license section ← config/license.ini.example (license-client)
 #   http section    ← config/http.ini.example (http-api)
-# Edit server_url / bind (and optional keys) per environment after install.
-# Prefer owner-only permissions when api_key is set (e.g. chmod 600).
+# Edit server_url / license_key / bind (and optional keys) per environment after install.
+# The file holds license_key; prefer owner-only permissions (e.g. chmod 600).
 
 HDR
   # Emit [license] then [http] from upstream files (strip leading comments-only

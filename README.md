@@ -10,14 +10,14 @@
 | `holter-analysis-assist` | CLI（ECL 解析・窓推論など） |
 | `holter-http-api` | HTTP API + 同一プロセスの簡易ブラウザ UI（`/ui/`） |
 
-どちらも同じ解析ライブラリを使い、起動時／解析ジョブ単位でライセンス確認・計上します（`1 解析ジョブ = 1 計上`）。  
-**暫定:** ライセンスサーバーへ到達できない／タイムアウト／非 2xx／不正 JSON の場合は **許可**します。JSON で明示的に `allowed: false` のときだけ拒否します（本番サーバー整備後に fail-closed へ戻す想定）。
+どちらも同じ解析ライブラリを使い、起動時にライセンスの有効性を確認し、解析ジョブ単位で利用を記録します（`1 解析ジョブ = 1 計上`）。  
+ライセンスサーバーへ到達できない／タイムアウト／成功以外の応答の場合は、起動または解析を **拒否** します（詳細は「[ライセンスサーバー接続](#ライセンスサーバー接続)」）。
 
 ## 前提
 
 - Rust stable（`rust-toolchain.toml` で固定）
 - 対象ビルド: **Linux** (`x86_64-unknown-linux-gnu`) / **Windows** (`x86_64-pc-windows-msvc`)
-- ライセンスサーバー到達先は **ini** で指定（後述）
+- ライセンスサーバーの URL とライセンスキーは **ini** で指定（後述）。実行時はライセンスサーバーへの到達が必須
 
 ローカルに rustup が無い場合、プロジェクト内ツールチェーンを使えます:
 
@@ -64,9 +64,54 @@ cargo run --release -- analyze-ecl resources/samples/sample.ecl \
 cargo run --release -- analyze-ecl resources/samples/sample.ecl --max-windows 5
 ```
 
-CLI のライセンス設定は `--license-config` または環境変数 `HOLTER_LICENSE_INI`（既定: `config/license.ini`）。サンプルは `config/license.ini.example`。
+CLI のライセンス設定は `--license-config` または環境変数 `HOLTER_LICENSE_INI`（既定: `config/license.ini`）。サンプルは `config/license.ini.example`（キーは次節）。
 
 `infer-window` は前処理済み float32 LE 窓（40,000 bytes = 10,000 samples）を `--input` で渡せます。省略時は合成サイン波でスモークします。
+
+## ライセンスサーバー接続
+
+CLI・HTTP API とも、ini の `[license]` セクションでライセンスサーバーを指定します。キーの意味の正本は `config/license.ini.example` です（他の設定サンプルや文書では再定義しません）。キー名は Windows / Linux 共通です。
+
+```ini
+[license]
+server_url=https://license.example.com
+license_key=lk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# timeout_secs=10
+```
+
+- `server_url`（必須）: ライセンスサーバーのベース URL。パス接頭辞付き（例: `https://host.example.com/license`）も可。エンドポイントのパスはサーバー契約で固定です。本番は `https://`、`http://` はローカル開発用
+- `license_key`（必須）: 発行されたライセンスキー。未設定・空白のみは起動拒否。`Authorization: Bearer` ヘッダでのみ送信し、URL や要求本文には載せません。ログ・エラー出力にも値を出しません
+- `timeout_secs`（任意）: ライセンス要求のタイムアウト秒数。既定 10
+- `license_key` を書いた ini は秘密情報です。OS のファイル権限で所有者だけが読めるようにしてください（例: `chmod 600`、Windows は所有者のみの ACL）
+
+動作:
+
+- **起動時**: 有効性確認を 1 回行い、有効と応答された場合だけ起動します（HTTP API は失敗時にポートを開きません）
+- **解析ジョブごと**: 推論の直前に利用を 1 件記録し、記録に成功した場合だけ解析します。心電図データや解析結果はサーバーへ送りません
+- サーバーへ到達できない・タイムアウト・5xx など成功以外の応答は、すべて拒否します。オフライン運用はなく、自動リトライもしません
+- 月間上限 0 のライセンスは **上限なし** として扱います。月の区切り（日本時間の暦月）と上限の判定はサーバー側で行います
+
+拒否時は `license startup failed (<理由コード>): <説明>`（起動時）または `license inference denied (<理由コード>): <説明>`（解析時）を標準エラーに出し、CLI は非 0 で終了します。
+
+| 理由コード | 意味 | HTTP API（`POST /v1/analyze`） |
+|---|---|---|
+| `invalid_request` | キーの設定不備（欠落・形式不正） | 403 `license_inference_denied` |
+| `license_invalid` | ライセンス無効（未登録のキー） | 403 `license_inference_denied` |
+| `license_suspended` | 利用停止 | 403 `license_inference_denied` |
+| `monthly_limit_reached` | 当月上限到達（解析時のみ） | 403 `license_inference_denied` |
+| `rate_limited` | 要求過多（時間をおいて再試行可） | 429 `license_rate_limited` |
+| `temporary_failure` | 一時障害・到達不能・タイムアウト（時間をおいて再試行可） | 503 `license_temporarily_unavailable` |
+| `unexpected_response` | サーバー応答を解釈できない | 403 `license_inference_denied` |
+| `gate_not_installed` | ライセンス確認の初期化前に解析が呼ばれた（内部エラー） | 403 `license_inference_denied` |
+
+HTTP API のエラー本文の `error.message` は `<理由コード>: <説明>` の形です（例: `monthly_limit_reached: The monthly usage limit has been reached.`）。429 / 503 は時間をおいて再試行できる拒否、403 は設定やライセンス状態の見直しが必要な拒否です。
+
+旧設定からの移行:
+
+- `api_key` は `license_key` に書き換えてください（`api_key` だけの ini は設定エラーで起動しません。両方ある場合は `license_key` を使い、警告を 1 行出します）
+- `check_path` / `meter_path` は廃止です。削除してください（書かれていると設定エラーで起動しません）
+
+範囲外: 当月の利用状況（使用回数・残り回数）の照会・表示と、ライセンスの発行・停止などの管理用 API は本製品では扱いません。
 
 ## HTTP API / UI コンソールの使い方
 
@@ -101,7 +146,7 @@ provider=cpu
 
 [license]
 server_url=https://license.example.com
-# api_key=replace-me
+license_key=lk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 例: 別ポートで 2 プロセス起動
@@ -120,8 +165,8 @@ server_url=https://license.example.com
 2. 環境変数 `HOLTER_HTTP_INI`
 3. 既定 `config/http.ini`
 
-起動時にライセンスが明示拒否（`allowed: false`）の場合は **ポートを開かず**終了します。  
-サーバー未到達などの通信失敗は暫定的に許可します（上記）。
+起動時の有効性確認に失敗した場合（拒否・サーバー未到達・タイムアウトを含む）は **ポートを開かず**終了します。  
+解析リクエストのライセンス起因エラー（403 / 429 / 503）は「[ライセンスサーバー接続](#ライセンスサーバー接続)」を参照してください。
 
 ### 2. 起動
 
