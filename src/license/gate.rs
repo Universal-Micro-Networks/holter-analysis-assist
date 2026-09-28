@@ -108,6 +108,24 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    const ALL_REASONS: [LicenseFailureReason; 8] = [
+        LicenseFailureReason::InvalidRequest,
+        LicenseFailureReason::LicenseInvalid,
+        LicenseFailureReason::LicenseSuspended,
+        LicenseFailureReason::MonthlyLimitReached,
+        LicenseFailureReason::RateLimited,
+        LicenseFailureReason::TemporaryFailure,
+        LicenseFailureReason::UnexpectedResponse,
+        LicenseFailureReason::GateNotInstalled,
+    ];
+
+    fn reject(reason: LicenseFailureReason, message: Option<&str>) -> MockOutcome {
+        MockOutcome::Reject {
+            reason,
+            message: message.map(Into::into),
+        }
+    }
+
     fn with_clean_global(f: impl FnOnce()) {
         let _guard = super::GLOBAL_TEST_LOCK
             .lock()
@@ -185,16 +203,17 @@ mod tests {
     }
 
     #[test]
-    fn startup_deny_returns_startup_failed_not_ok() {
+    fn startup_reject_returns_startup_failed_not_ok() {
         let gate = LicenseGate::new(MockLicenseClient::new(
-            MockOutcome::Deny {
-                message: Some("license expired".into()),
-            },
+            reject(
+                LicenseFailureReason::LicenseInvalid,
+                Some("license expired"),
+            ),
             MockOutcome::Success { message: None },
         ));
         let err = gate
             .ensure_startup_licensed()
-            .expect_err("startup deny must not return Ok");
+            .expect_err("startup reject must not return Ok");
         assert!(
             matches!(&err, LicenseError::StartupFailed(f) if f.message.contains("license expired")),
             "must be StartupFailed: {err:?}"
@@ -203,6 +222,24 @@ mod tests {
             err.to_string().contains("startup failed"),
             "Display must include startup category: {err}"
         );
+    }
+
+    #[test]
+    fn startup_reject_propagates_reason_unchanged() {
+        for reason in ALL_REASONS {
+            let gate = LicenseGate::new(MockLicenseClient::new(
+                reject(reason, Some("rejected")),
+                MockOutcome::Success { message: None },
+            ));
+            let err = gate
+                .ensure_startup_licensed()
+                .expect_err("startup reject must not return Ok");
+            assert_eq!(
+                err,
+                LicenseError::StartupFailed(LicenseFailure::new(reason, "rejected")),
+                "{reason:?}"
+            );
+        }
     }
 
     #[test]
@@ -216,16 +253,30 @@ mod tests {
         let err = gate
             .ensure_startup_licensed()
             .expect_err("startup transport must not return Ok");
-        assert!(matches!(err, LicenseError::StartupFailed(_)));
+        assert_eq!(
+            err,
+            LicenseError::StartupFailed(LicenseFailure::new(
+                LicenseFailureReason::TemporaryFailure,
+                "connection timed out",
+            ))
+        );
     }
 
     #[test]
-    fn startup_allowed_false_is_startup_failed() {
+    fn startup_allowed_false_is_startup_failed_unexpected_response() {
         let gate = LicenseGate::new(AllowedFalseClient);
         let err = gate
             .ensure_startup_licensed()
             .expect_err("allowed:false must not return Ok");
-        assert!(matches!(err, LicenseError::StartupFailed(_)));
+        assert!(
+            matches!(
+                &err,
+                LicenseError::StartupFailed(f)
+                    if f.reason == LicenseFailureReason::UnexpectedResponse
+                        && f.message == "not allowed"
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -264,16 +315,17 @@ mod tests {
     }
 
     #[test]
-    fn inference_deny_returns_inference_denied_not_ok() {
+    fn inference_reject_returns_inference_denied_not_ok() {
         let gate = LicenseGate::new(MockLicenseClient::new(
             MockOutcome::Success { message: None },
-            MockOutcome::Deny {
-                message: Some("quota exceeded".into()),
-            },
+            reject(
+                LicenseFailureReason::MonthlyLimitReached,
+                Some("quota exceeded"),
+            ),
         ));
         let err = gate
             .ensure_inference_allowed()
-            .expect_err("inference deny must not return Ok");
+            .expect_err("inference reject must not return Ok");
         assert!(
             matches!(&err, LicenseError::InferenceDenied(f) if f.message.contains("quota exceeded")),
             "must be InferenceDenied: {err:?}"
@@ -282,6 +334,24 @@ mod tests {
             err.to_string().contains("inference denied"),
             "Display must include inference category: {err}"
         );
+    }
+
+    #[test]
+    fn inference_reject_propagates_reason_unchanged() {
+        for reason in ALL_REASONS {
+            let gate = LicenseGate::new(MockLicenseClient::new(
+                MockOutcome::Success { message: None },
+                reject(reason, Some("rejected")),
+            ));
+            let err = gate
+                .ensure_inference_allowed()
+                .expect_err("inference reject must not return Ok");
+            assert_eq!(
+                err,
+                LicenseError::InferenceDenied(LicenseFailure::new(reason, "rejected")),
+                "{reason:?}"
+            );
+        }
     }
 
     #[test]
@@ -295,16 +365,72 @@ mod tests {
         let err = gate
             .ensure_inference_allowed()
             .expect_err("inference transport must not return Ok");
-        assert!(matches!(err, LicenseError::InferenceDenied(_)));
+        assert_eq!(
+            err,
+            LicenseError::InferenceDenied(LicenseFailure::new(
+                LicenseFailureReason::TemporaryFailure,
+                "dns failure",
+            ))
+        );
     }
 
     #[test]
-    fn inference_allowed_false_is_inference_denied() {
+    fn inference_allowed_false_is_inference_denied_unexpected_response() {
         let gate = LicenseGate::new(AllowedFalseClient);
         let err = gate
             .ensure_inference_allowed()
             .expect_err("allowed:false must not return Ok");
-        assert!(matches!(err, LicenseError::InferenceDenied(_)));
+        assert!(
+            matches!(
+                &err,
+                LicenseError::InferenceDenied(f)
+                    if f.reason == LicenseFailureReason::UnexpectedResponse
+                        && f.message == "not allowed"
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn allowed_false_without_message_still_has_non_empty_summary() {
+        struct SilentDenyClient;
+        impl LicenseClient for SilentDenyClient {
+            fn check_validity(&self) -> Result<LicenseCheckResult, LicenseError> {
+                Ok(LicenseCheckResult::default())
+            }
+            fn authorize_and_meter(&self) -> Result<LicenseMeterResult, LicenseError> {
+                Ok(LicenseMeterResult::default())
+            }
+        }
+        let gate = LicenseGate::new(SilentDenyClient);
+        for err in [
+            gate.ensure_startup_licensed().expect_err("startup"),
+            gate.ensure_inference_allowed().expect_err("inference"),
+        ] {
+            assert_eq!(err.reason(), Some(LicenseFailureReason::UnexpectedResponse));
+            match &err {
+                LicenseError::StartupFailed(f) | LicenseError::InferenceDenied(f) => {
+                    assert!(!f.message.trim().is_empty(), "{err:?}")
+                }
+                LicenseError::Config(_) => panic!("unexpected config error"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_inference_still_counts_one_meter_call_and_no_check() {
+        let check_calls = Arc::new(AtomicUsize::new(0));
+        let meter_calls = Arc::new(AtomicUsize::new(0));
+        let gate = LicenseGate::new(CountingClient::new(
+            MockOutcome::Success { message: None },
+            reject(LicenseFailureReason::RateLimited, None),
+            Arc::clone(&check_calls),
+            Arc::clone(&meter_calls),
+        ));
+        let err = gate.ensure_inference_allowed().expect_err("rejected");
+        assert_eq!(err.reason(), Some(LicenseFailureReason::RateLimited));
+        assert_eq!(meter_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(check_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

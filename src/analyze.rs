@@ -441,8 +441,8 @@ mod tests {
     use super::*;
     use crate::inference_options::{BatchSize, CudaTuning};
     use crate::license::{
-        LicenseCheckResult, LicenseClient, LicenseError, LicenseGate, LicenseMeterResult,
-        MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
+        LicenseCheckResult, LicenseClient, LicenseError, LicenseFailureReason, LicenseGate,
+        LicenseMeterResult, MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
     };
     use crate::model_source::ModelSource;
     use crate::phase2::InferError;
@@ -667,8 +667,16 @@ mod tests {
                 "must surface inference denial: {msg}"
             );
             assert!(
-                matches!(err, AnalyzeError::License(LicenseError::InferenceDenied(_))),
-                "expected License(InferenceDenied), got {err:?}"
+                matches!(
+                    &err,
+                    AnalyzeError::License(LicenseError::InferenceDenied(f))
+                        if f.reason == LicenseFailureReason::GateNotInstalled
+                ),
+                "expected License(InferenceDenied(gate_not_installed)), got {err:?}"
+            );
+            assert!(
+                msg.contains("gate_not_installed"),
+                "must surface the reason code: {msg}"
             );
             assert!(!csv.exists(), "must not write CSV when gate missing");
         });
@@ -679,7 +687,8 @@ mod tests {
         with_clean_global(|| {
             LicenseGate::install(LicenseGate::new(MockLicenseClient::new(
                 MockOutcome::Success { message: None },
-                MockOutcome::Deny {
+                MockOutcome::Reject {
+                    reason: LicenseFailureReason::MonthlyLimitReached,
                     message: Some("quota exceeded".into()),
                 },
             )))
@@ -701,8 +710,12 @@ mod tests {
                 "must identify inference denial: {msg}"
             );
             assert!(
-                matches!(err, AnalyzeError::License(LicenseError::InferenceDenied(_))),
-                "expected License(InferenceDenied), got {err:?}"
+                matches!(
+                    &err,
+                    AnalyzeError::License(LicenseError::InferenceDenied(f))
+                        if f.reason == LicenseFailureReason::MonthlyLimitReached
+                ),
+                "expected License(InferenceDenied(monthly_limit_reached)), got {err:?}"
             );
             assert!(!csv.exists(), "must not write CSV on meter deny");
         });
@@ -1105,8 +1118,12 @@ mod tests {
             )
             .expect_err("uninstalled gate must fail-closed");
             assert!(
-                matches!(err, AnalyzeError::License(LicenseError::InferenceDenied(_))),
-                "expected License(InferenceDenied), got {err:?}"
+                matches!(
+                    &err,
+                    AnalyzeError::License(LicenseError::InferenceDenied(f))
+                        if f.reason == LicenseFailureReason::GateNotInstalled
+                ),
+                "expected License(InferenceDenied(gate_not_installed)), got {err:?}"
             );
             assert_eq!(calls, 0, "no window may be observed without license");
             assert!(!csv.exists());

@@ -355,8 +355,8 @@ mod tests {
     use crate::http::response::ResponseCodec;
     use crate::inference_options::{BatchSize, CudaTuning};
     use crate::license::{
-        LicenseCheckResult, LicenseClient, LicenseError, LicenseGate, LicenseMeterResult,
-        MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
+        LicenseCheckResult, LicenseClient, LicenseError, LicenseFailureReason, LicenseGate,
+        LicenseMeterResult, MockLicenseClient, MockOutcome, GLOBAL_TEST_LOCK,
     };
     use crate::model_source::ModelSource;
     use crate::phase2::ExecutionProviderKind;
@@ -711,7 +711,8 @@ mod tests {
     #[test]
     fn license_deny_returns_403_and_meters_once() {
         with_gate(
-            MockOutcome::Deny {
+            MockOutcome::Reject {
+                reason: LicenseFailureReason::MonthlyLimitReached,
                 message: Some("quota exceeded".into()),
             },
             |meter_calls| {
@@ -786,7 +787,8 @@ mod tests {
     #[test]
     fn format_json_field_still_returns_json_error_envelope_on_deny() {
         with_gate(
-            MockOutcome::Deny {
+            MockOutcome::Reject {
+                reason: LicenseFailureReason::LicenseInvalid,
                 message: Some("deny".into()),
             },
             |_meter_calls| {
