@@ -224,7 +224,7 @@ impl BaselineWindows {
     fn record(&mut self, wi: usize, out: &WindowOutputs) {
         debug_assert_eq!(wi, self.rhythm.len(), "windows arrive in order");
         self.rhythm.push(out.rhythm);
-        if wi % self.stride == 0 {
+        if wi.is_multiple_of(self.stride) {
             self.sampled.push(out.clone());
         }
     }
@@ -234,7 +234,7 @@ impl BaselineWindows {
         if let Some(&rhythm) = self.rhythm.get(wi) {
             acc.observe_rhythm(rhythm, out.rhythm);
         }
-        if wi % self.stride == 0 {
+        if wi.is_multiple_of(self.stride) {
             if let Some(kept) = self.sampled.get(wi / self.stride) {
                 acc.observe_outputs(kept, out);
             }

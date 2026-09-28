@@ -1,7 +1,7 @@
 //! http-api task 1.1: Cargo.toml declares Axum 0.7.x, Tokio multi-thread, tower-http limit/timeout.
 //!
 //! License gate, routes, and packaging are deferred; this locks HTTP runtime dependency
-//! declarations required by design (MSRV 1.74).
+//! declarations required by design.
 
 use std::fs;
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ fn cargo_toml_declares_axum_07() {
         .expect("[dependencies] must declare axum for HTTP server");
     assert!(
         axum_line.contains("0.7"),
-        "axum must be 0.7.x (MSRV 1.74; 0.8 not adopted); got: {axum_line}"
+        "axum must be 0.7.x (0.8 not adopted); got: {axum_line}"
     );
 }
 

@@ -1,7 +1,7 @@
 //! license-client task 1.1: Cargo.toml declares reqwest 0.12 + rust-ini (ini).
 //!
 //! Runtime license modules are deferred to later tasks; this only locks dependency
-//! declarations required by design (blocking HTTP + ini parse, MSRV 1.74).
+//! declarations required by design (blocking HTTP + ini parse).
 
 use std::fs;
 use std::path::PathBuf;
@@ -37,7 +37,7 @@ fn cargo_toml_declares_reqwest_012_blocking_json_rustls() {
         .expect("reqwest dependency line");
     assert!(
         reqwest_block.contains("0.12"),
-        "reqwest must be 0.12.x (MSRV 1.74); got: {reqwest_block}"
+        "reqwest must be 0.12.x; got: {reqwest_block}"
     );
     assert!(
         deps.contains("blocking") && deps.contains("json") && deps.contains("rustls-tls"),

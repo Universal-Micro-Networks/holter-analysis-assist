@@ -110,7 +110,7 @@ pub fn read_ecl_adc_counts(path: &Path) -> Result<Vec<f32>, PreprocessError> {
     let mut file = File::open(path)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(PreprocessError::Invalid(
             "ECL size is not a multiple of 2 bytes".into(),
         ));
@@ -129,8 +129,8 @@ pub fn read_ecl_adc_counts(path: &Path) -> Result<Vec<f32>, PreprocessError> {
     }
     let words = &bytes[..n_read * 2];
     let mut ecg = Vec::with_capacity(n_read);
-    for chunk in words.chunks_exact(2) {
-        let w = u16::from_le_bytes([chunk[0], chunk[1]]);
+    for &chunk in words.as_chunks::<2>().0 {
+        let w = u16::from_le_bytes(chunk);
         let high4 = (w & ECL_ECG_HIGH4_MASK) >> 4;
         let low8 = w & ECL_ECG_LOW8_MASK;
         let raw12 = (high4 | low8) as i32;

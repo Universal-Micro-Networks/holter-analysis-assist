@@ -47,8 +47,8 @@ fn main() {
             path.display()
         );
         let mut samples = vec![0.0_f32; WINDOW_SAMPLES];
-        for (j, chunk) in bytes.chunks_exact(4).enumerate() {
-            samples[j] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for (j, &chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
+            samples[j] = f32::from_le_bytes(chunk);
         }
 
         if i < warmup {

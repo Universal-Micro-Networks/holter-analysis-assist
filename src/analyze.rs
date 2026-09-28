@@ -219,7 +219,7 @@ fn infer_windows(
                 end_sample_500: start_abs + WINDOW_SAMPLES as i64,
                 rhythm_score: out.rhythm,
             });
-            if wi > 0 && wi % 200 == 0 {
+            if wi > 0 && wi.is_multiple_of(200) {
                 eprintln!("      ... window {wi}/{}", starts.len());
             }
         }

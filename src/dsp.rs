@@ -161,7 +161,7 @@ pub fn resample_poly_2x(x: &[f32]) -> Vec<f32> {
     // SciPy: n_pre_pad = (down - half_len % down); for down=1 → 1
     let n_pre_pad = 1usize;
     let mut h = Vec::with_capacity(RESAMPLE_FIR_BASE.len() + n_pre_pad);
-    h.extend(std::iter::repeat(0.0).take(n_pre_pad));
+    h.extend(std::iter::repeat_n(0.0, n_pre_pad));
     h.extend_from_slice(&RESAMPLE_FIR_BASE);
 
     let n_pre_remove = (half_len + n_pre_pad) / DOWN; // 21
@@ -179,7 +179,7 @@ fn upfirdn(h: &[f64], x: &[f32], up: usize, down: usize) -> Vec<f32> {
         let base = i * up;
         for (k, &hk) in h.iter().enumerate() {
             let idx = (base + k) / down;
-            if (base + k) % down == 0 && idx < out_len {
+            if (base + k).is_multiple_of(down) && idx < out_len {
                 y[idx] += (xi as f64 * hk) as f32;
             }
         }

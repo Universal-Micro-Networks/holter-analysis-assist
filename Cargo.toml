@@ -5,7 +5,7 @@ edition = "2021"
 description = "Holter ECG arrhythmia classification assist (CLI first, API later)"
 license = "MIT"
 readme = "README.md"
-rust-version = "1.74"
+rust-version = "1.88"
 
 [features]
 default = ["cuda"]

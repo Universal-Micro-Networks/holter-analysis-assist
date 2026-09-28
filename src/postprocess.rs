@@ -581,7 +581,7 @@ fn calc_amplitude_area_0_40(x: &[f64], fs: f64) -> f64 {
         let _ = k;
         amp.push(bin.norm() / (n as f64 * coherent_gain));
     }
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         if amp.len() > 2 {
             let last = amp.len() - 1;
             for a in amp.iter_mut().take(last).skip(1) {

@@ -610,13 +610,15 @@ fn split_window_outputs(
     rhythm: &[f32],
     count: usize,
 ) -> Vec<WindowOutputs> {
-    beat.chunks_exact(WINDOW_SAMPLES)
-        .zip(event.chunks_exact(WINDOW_SAMPLES * 3))
+    let (beat, _) = beat.as_chunks::<WINDOW_SAMPLES>();
+    let (event, _) = event.as_chunks::<{ WINDOW_SAMPLES * 3 }>();
+    beat.iter()
+        .zip(event)
         .zip(rhythm)
         .take(count)
         .map(|((beat, event), &rhythm)| WindowOutputs {
             beat: beat.to_vec(),
-            event: event.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+            event: event.as_chunks::<3>().0.to_vec(),
             rhythm,
         })
         .collect()
