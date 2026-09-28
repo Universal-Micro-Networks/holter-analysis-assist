@@ -276,10 +276,10 @@ fn cpu_batch16_candidate_matches_baseline_and_writes_all_outputs() {
         }
         let p = &a.prob_max_abs_diff;
         assert_eq!(p.sampled_windows, SYNTH_ECL_WINDOWS, "prob_stride 1");
-        assert_eq!(
-            [p.beat, p.event_pac, p.event_pvc, p.event_n, p.rhythm],
-            [0.0; 5]
-        );
+        // x86 ONNX Runtime kernels vary by batch size; only last-bit noise is allowed.
+        for diff in [p.beat, p.event_pac, p.event_pvc, p.event_n, p.rhythm] {
+            assert!(diff <= 1e-5, "{p:?}");
+        }
 
         for perf in [&file.baseline_perf, &file.candidate_perf] {
             assert_eq!(perf.windows, SYNTH_ECL_WINDOWS);

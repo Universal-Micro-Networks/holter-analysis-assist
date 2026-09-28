@@ -869,37 +869,53 @@ mod tests {
         }
     }
 
-    type CandidateKey = (i64, usize, usize, u32, u32, u32, u32, u32);
+    /// On x86 CPUs ONNX Runtime picks different kernels per batch size, so raw
+    /// scores may differ in the last bits; positions must still match exactly.
+    const SCORE_TOLERANCE: f32 = 1e-5;
 
-    fn candidate_keys(candidates: &[crate::postprocess::BeatCandidate]) -> Vec<CandidateKey> {
+    fn assert_scores_close(left: &[f32], right: &[f32], context: &str) {
+        assert_eq!(left.len(), right.len(), "{context}: length");
+        for (i, (a, b)) in left.iter().zip(right).enumerate() {
+            assert!(
+                (a - b).abs() <= SCORE_TOLERANCE,
+                "{context}[{i}]: {a} vs {b}"
+            );
+        }
+    }
+
+    fn candidate_positions(
+        candidates: &[crate::postprocess::BeatCandidate],
+    ) -> Vec<(i64, usize, usize)> {
         candidates
             .iter()
-            .map(|c| {
-                (
-                    c.abs_pos,
-                    c.local_pos,
-                    c.window_index,
-                    c.beat_score.to_bits(),
-                    c.center_distance.to_bits(),
-                    c.pac_score.to_bits(),
-                    c.pvc_score.to_bits(),
-                    c.n_score.to_bits(),
-                )
+            .map(|c| (c.abs_pos, c.local_pos, c.window_index))
+            .collect()
+    }
+
+    fn candidate_scores(candidates: &[crate::postprocess::BeatCandidate]) -> Vec<f32> {
+        candidates
+            .iter()
+            .flat_map(|c| {
+                [
+                    c.beat_score,
+                    c.center_distance,
+                    c.pac_score,
+                    c.pvc_score,
+                    c.n_score,
+                ]
             })
             .collect()
     }
 
-    fn rhythm_keys(windows: &[RhythmWindow]) -> Vec<(i64, i64, u32)> {
+    fn rhythm_positions(windows: &[RhythmWindow]) -> Vec<(i64, i64)> {
         windows
             .iter()
-            .map(|w| {
-                (
-                    w.start_sample_500,
-                    w.end_sample_500,
-                    w.rhythm_score.to_bits(),
-                )
-            })
+            .map(|w| (w.start_sample_500, w.end_sample_500))
             .collect()
+    }
+
+    fn rhythm_scores(windows: &[RhythmWindow]) -> Vec<f32> {
+        windows.iter().map(|w| w.rhythm_score).collect()
     }
 
     #[test]
@@ -943,14 +959,24 @@ mod tests {
         );
 
         assert_eq!(
-            candidate_keys(&one.candidates),
-            candidate_keys(&sixteen.candidates),
-            "candidates must not depend on batch size"
+            candidate_positions(&one.candidates),
+            candidate_positions(&sixteen.candidates),
+            "candidate positions must not depend on batch size"
+        );
+        assert_scores_close(
+            &candidate_scores(&one.candidates),
+            &candidate_scores(&sixteen.candidates),
+            "candidate scores (batch 1 vs 16)",
         );
         assert_eq!(
-            rhythm_keys(&one.rhythm_windows),
-            rhythm_keys(&sixteen.rhythm_windows),
+            rhythm_positions(&one.rhythm_windows),
+            rhythm_positions(&sixteen.rhythm_windows),
             "rhythm windows must not depend on batch size"
+        );
+        assert_scores_close(
+            &rhythm_scores(&one.rhythm_windows),
+            &rhythm_scores(&sixteen.rhythm_windows),
+            "rhythm scores (batch 1 vs 16)",
         );
         for (k, w) in sixteen.rhythm_windows.iter().enumerate() {
             assert_eq!(w.start_sample_500, signal.starts_abs_500[k]);
@@ -981,9 +1007,17 @@ mod tests {
                 signal.starts_abs_500[k],
             );
             let want = reference_model.infer_window(&window).expect("infer_window");
-            assert_eq!(out.beat, want.beat, "window {k}: beat");
-            assert_eq!(out.event, want.event, "window {k}: event");
-            assert_eq!(out.rhythm, want.rhythm, "window {k}: rhythm");
+            assert_scores_close(&out.beat, &want.beat, &format!("window {k}: beat"));
+            assert_scores_close(
+                out.event.as_flattened(),
+                want.event.as_flattened(),
+                &format!("window {k}: event"),
+            );
+            assert_scores_close(
+                &[out.rhythm],
+                &[want.rhythm],
+                &format!("window {k}: rhythm"),
+            );
         }
     }
 

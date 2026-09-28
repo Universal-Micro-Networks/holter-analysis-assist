@@ -42,10 +42,25 @@ fn flat_windows(n: usize) -> Vec<f32> {
     (0..n).flat_map(window).collect()
 }
 
+/// On x86 CPUs ONNX Runtime picks different kernels per batch size, so outputs
+/// may differ in the last bits.
+const SCORE_TOLERANCE: f32 = 1e-5;
+
+fn assert_slice_close(ctx: &str, got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), want.len(), "{ctx}: length");
+    for (i, (a, b)) in got.iter().zip(want).enumerate() {
+        assert!((a - b).abs() <= SCORE_TOLERANCE, "{ctx}[{i}]: {a} vs {b}");
+    }
+}
+
 fn assert_same(ctx: &str, got: &WindowOutputs, want: &WindowOutputs) {
-    assert_eq!(got.beat, want.beat, "{ctx}: beat");
-    assert_eq!(got.event, want.event, "{ctx}: event");
-    assert_eq!(got.rhythm, want.rhythm, "{ctx}: rhythm");
+    assert_slice_close(&format!("{ctx}: beat"), &got.beat, &want.beat);
+    assert_slice_close(
+        &format!("{ctx}: event"),
+        got.event.as_flattened(),
+        want.event.as_flattened(),
+    );
+    assert_slice_close(&format!("{ctx}: rhythm"), &[got.rhythm], &[want.rhythm]);
 }
 
 fn per_window_reference(n: usize) -> Vec<WindowOutputs> {
@@ -237,22 +252,6 @@ fn cuda_graph_request_on_cpu_runs_actual_count_without_padding() {
     }
 }
 
-#[cfg(feature = "cuda")]
-fn assert_close(ctx: &str, got: &WindowOutputs, want: &WindowOutputs) {
-    const TOL: f32 = 1e-5;
-    let close = |a: f32, b: f32| (a - b).abs() <= TOL;
-    assert!(close(got.rhythm, want.rhythm), "{ctx}: rhythm");
-    for (i, (a, b)) in got.beat.iter().zip(&want.beat).enumerate() {
-        assert!(close(*a, *b), "{ctx}: beat[{i}] {a} vs {b}");
-    }
-    for (i, (a, b)) in got.event.iter().zip(&want.event).enumerate() {
-        assert!(
-            a.iter().zip(b).all(|(x, y)| close(*x, *y)),
-            "{ctx}: event[{i}] {a:?} vs {b:?}"
-        );
-    }
-}
-
 /// Needs a CUDA-capable GPU; skipped when the CUDA provider cannot be loaded.
 #[cfg(feature = "cuda")]
 #[test]
@@ -291,12 +290,12 @@ fn cuda_graph_on_gpu_matches_cpu_across_repeated_and_tail_batches() {
         }
         assert_eq!(outputs.len(), total);
         for (k, (got, want)) in outputs.iter().zip(&reference).enumerate() {
-            assert_close(&format!("round {round} window {k}"), got, want);
+            assert_same(&format!("round {round} window {k}"), got, want);
         }
     }
 
     let single = model.infer_window(&window(5)).expect("infer_window");
-    assert_close("infer_window", &single, &reference[5]);
+    assert_same("infer_window", &single, &reference[5]);
 }
 
 #[test]
