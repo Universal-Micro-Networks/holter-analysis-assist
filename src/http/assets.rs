@@ -68,6 +68,68 @@ mod tests {
         );
     }
 
+    /// Values of `href="…"` / `src="…"` attributes in `html`.
+    fn resource_refs(html: &str) -> Vec<String> {
+        let mut refs = Vec::new();
+        for attr in ["href=\"", "src=\""] {
+            let mut rest = html;
+            while let Some(start) = rest.find(attr) {
+                rest = &rest[start + attr.len()..];
+                let end = rest.find('"').expect("unterminated attribute");
+                refs.push(rest[..end].to_string());
+                rest = &rest[end..];
+            }
+        }
+        refs
+    }
+
+    #[test]
+    fn console_html_has_no_external_resource_references() {
+        // Closed networks: the console must load without any CDN.
+        let html = asset_text("index.html");
+        let lower = html.to_ascii_lowercase();
+        for scheme in ["http://", "https://", "//cdn"] {
+            assert!(
+                !lower.contains(scheme),
+                "index.html must not reference external resources ('{scheme}')"
+            );
+        }
+
+        let refs = resource_refs(&html);
+        assert!(
+            refs.iter().any(|r| r == "vendor/bulma.min.css"),
+            "index.html must load vendored Bulma; refs: {refs:?}"
+        );
+        let names = asset_names();
+        for r in &refs {
+            assert!(
+                names.contains(r.as_str()),
+                "index.html reference '{r}' must resolve to an embedded asset; have {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn embeds_vendored_bulma_with_license() {
+        let css = asset_text("vendor/bulma.min.css");
+        assert!(
+            css.contains("bulma.io v1.0.2"),
+            "vendored Bulma must be exactly v1.0.2"
+        );
+        let lower = css.to_ascii_lowercase();
+        assert!(
+            !lower.contains("@import") && !lower.contains("http://") && !lower.contains("https://"),
+            "vendored Bulma must not pull further external resources"
+        );
+
+        let license = asset_text("vendor/bulma.LICENSE");
+        assert!(license.contains("MIT License"), "Bulma LICENSE must be MIT");
+        assert!(
+            license.contains("Jeremy Thomas"),
+            "Bulma LICENSE must keep the copyright notice"
+        );
+    }
+
     #[test]
     fn console_html_has_japanese_guidance_and_controls() {
         // Requirements 2.1, 3.1, 4.1–4.2, 7.1–7.2 — Japanese labels / short guidance.

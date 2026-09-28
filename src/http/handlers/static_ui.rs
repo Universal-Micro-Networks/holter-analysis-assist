@@ -190,6 +190,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_vendored_bulma_returns_200_css() {
+        let app = static_ui_router();
+        let res = get(&app, "/ui/vendor/bulma.min.css").await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = content_type(&res);
+        assert!(
+            ct.starts_with("text/css"),
+            "vendor/bulma.min.css Content-Type, got {ct}"
+        );
+        let body = to_bytes(res.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("bulma");
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(text.contains("bulma.io v1.0.2"), "must serve Bulma v1.0.2");
+    }
+
+    #[tokio::test]
     async fn missing_asset_returns_404() {
         let app = static_ui_router();
         let res = get(&app, "/ui/does-not-exist.xyz").await;
