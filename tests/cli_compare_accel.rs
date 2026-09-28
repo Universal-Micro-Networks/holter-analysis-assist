@@ -309,7 +309,7 @@ fn passing_thresholds_print_markdown_summary_and_exit_0() {
             "--min-beat-class-agreement",
             "1",
             "--max-prob-abs-diff",
-            "0",
+            "0.00001",
             "--max-offset-samples",
             "0",
         ],

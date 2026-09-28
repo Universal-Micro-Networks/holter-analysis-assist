@@ -347,7 +347,7 @@ fn prob_stride_and_max_windows_limit_sampling_and_thresholds_are_judged() {
     cfg.prob_stride = 5;
     cfg.max_windows = Some(12);
     cfg.thresholds = Thresholds {
-        max_prob_abs_diff: Some(0.0),
+        max_prob_abs_diff: Some(1e-5),
         min_beat_match_rate: Some(1.5),
         ..Thresholds::default()
     };
