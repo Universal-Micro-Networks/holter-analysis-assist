@@ -200,7 +200,7 @@ sequenceDiagram
     alt denied
       Gate-->>A: InferenceDenied
       A-->>H: error
-      H-->>C: 403 license denied
+      H-->>C: 403 or 429 or 503 license denied
     else allowed
       Gate-->>A: Ok
       A->>M: infer windows
@@ -234,7 +234,7 @@ sequenceDiagram
 | 3.4 | 起動失敗の識別可能提示 | HttpStartup, HttpError | stderr | 起動 |
 | 4.1 | 解析前に許可+計上 1 回（正本内） | AnalyzeHandler → 正本入口 | `analyze_ecl_with_source` のみ | 解析リクエスト |
 | 4.2 | 計上成功で解析許可 | 正本入口 upstream | Ok | 解析リクエスト |
-| 4.3 | 計上失敗で結果非返却 | AnalyzeHandler, HttpError | 403 | 解析リクエスト |
+| 4.3 | 計上失敗で結果非返却 | AnalyzeHandler, HttpError | 403 / 429 / 503 | 解析リクエスト |
 | 4.4 | window 追加計上なし／HTTP 非直接呼出 | AnalyzeHandler | 非二重呼び出し | 解析リクエスト |
 | 4.5 | 1 推論 = 1 API リクエスト | AnalyzeHandler | ジョブ単位 | 解析リクエスト |
 | 5.1 | ヘルス成功応答 | HealthHandler | `GET /health` | — |
@@ -251,7 +251,7 @@ sequenceDiagram
 | 7.4 | タイムアウト失敗表面化 | Middleware, HttpError | 504/408 | 解析リクエスト |
 | 7.5 | 上限の ini 上書き | HttpIniConfig | optional keys | 起動 |
 | 8.1 | 入力エラー区分 | HttpError | 400 | 解析リクエスト |
-| 8.2 | 推論拒否区分 | HttpError | 403 | 解析リクエスト |
+| 8.2 | 推論拒否区分 | HttpError | 403 / 429 / 503 | 解析リクエスト |
 | 8.3 | サーバーエラー区分 | HttpError | 500 | 解析リクエスト |
 | 8.4 | 区分と概要、秘密非露出 | HttpError | error JSON | 両フロー |
 | 9.1 | Win/Linux 同一契約 | HttpStartup, HttpIniConfig | — | — |
@@ -385,7 +385,7 @@ impl HttpConfig {
 ##### API Contract
 | Method | Endpoint | Request | Response | Errors |
 |--------|----------|---------|----------|--------|
-| POST | `/v1/analyze` | multipart: `ecl` file; optional `format`, `provider`, `max_windows` | `200` CSV (`text/csv`) or JSON（行配列 + summary） | 400 入力, 403 推論拒否, 413 過大, 408/504 タイムアウト, 500 内部 |
+| POST | `/v1/analyze` | multipart: `ecl` file; optional `format`, `provider`, `max_windows` | `200` CSV (`text/csv`) or JSON（行配列 + summary） | 400 入力, 403 推論拒否, 429 ライセンス要求過多, 503 ライセンス一時障害, 413 過大, 408/504 タイムアウト, 500 内部 |
 
 ##### JSON 成功例（概念）
 ```json
@@ -407,11 +407,13 @@ impl HttpConfig {
 |------|------|-----------------|
 | 入力不正 | 400 | `invalid_input` |
 | ボディ過大 | 413 | `payload_too_large` |
-| ライセンス推論拒否 | 403 | `license_inference_denied` |
+| ライセンス推論拒否（再試行しても解消しない理由） | 403 | `license_inference_denied` |
+| ライセンス要求過多（時間をおいて再試行） | 429 | `license_rate_limited` |
+| ライセンス一時障害・到達不能・タイムアウト（時間をおいて再試行） | 503 | `license_temporarily_unavailable` |
 | タイムアウト | 504（または 408） | `request_timeout` |
 | 内部 | 500 | `internal_error` |
 
-エラーボディ: `{ "error": { "code": "...", "message": "..." } }`。秘密情報平文禁止。
+エラーボディ: `{ "error": { "code": "...", "message": "..." } }`。秘密情報平文禁止。ライセンス起因の 3 種は `message` を `<拒否理由コード>: <説明>` の形にする（理由コードと振り分けの正本は license-client の design「HttpErrorLicenseMapping」）。
 
 **Contracts**: Service [x] / API [x]
 
@@ -452,7 +454,7 @@ impl HttpConfig {
 ### Error Strategy
 - 起動: fail-closed、非リッスン、stderr に起動失敗区分
 - リクエスト: 上記マッピング。部分結果を返さない
-- 上流 `LicenseError::InferenceDenied` を 403 に対応付け（型マッチまたはメッセージ規約）
+- 上流 `LicenseError::InferenceDenied` を拒否理由で振り分ける（型マッチ）。要求過多は 429、一時障害は 503、それ以外は 403
 
 ### Monitoring
 - アクセス／エラーは tracing または stderr（初期は簡潔で可）
@@ -467,7 +469,7 @@ impl HttpConfig {
 
 ### Integration Tests
 - 起動: モック Gate を `install` し、起動ゲート失敗で bind しない／成功で `/health` が 200（3.x, 5.x）
-- 解析: 正本入口経由で成功 200、入力欠落で 400、InferenceDenied で 403 かつボディに結果なし（1.x, 4.x, 8.x）
+- 解析: 正本入口経由で成功 200、入力欠落で 400、InferenceDenied で 403 / 429 / 503（拒否理由による）かつボディに結果なし（1.x, 4.x, 8.x）
 - 計上: モック meter 呼び出しが解析 1 回あたり 1 回（正本入口内。HTTP ハンドラからの追加呼び出しなし）（4.4, 4.5）
 - 過大ボディ: 制限超過で 413（7.2）
 
