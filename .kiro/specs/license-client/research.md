@@ -140,6 +140,11 @@
 - **Rationale**: 既存クライアント・UI の互換を保ちつつ、再試行判断に必要な区別を HTTP レベルで提供
 - **Trade-offs**: 永続的な理由の機械判定はメッセージ解析が必要（必要になれば `error` に `reason` フィールドを追加する）
 
+### Decision: `invalid_request` は HTTP 400 のときだけキー設定不備とする
+- **Context**: サーバーの `app.py` は Flask の HTTPException（パス違いの 404、メソッド違いの 405 など）も `invalid_request` コードで返し、ステータスだけを元の値にする。コード優先で判定すると、`server_url` の誤りが「キー設定不備」と表示される
+- **Selected Approach**: `invalid_request` は 400 のときだけ `InvalidRequest`。それ以外はステータス規則（429 / 5xx / その他→`unexpected_response`）で判定し、説明文に `server_url` の確認を促す案内を付ける
+- **Rationale**: キー起因の拒否（`auth.py` の `extract_license_key` は必ず 400）と接続先の設定ミスを切り分けられる
+
 ### Decision: 利用記録の自動リトライはしない
 - **Rationale**: 応答を受け取れなかった場合にサーバー側で記録済みの可能性があり、再送は二重計上になりうる。要求過多・一時障害は呼出側の再試行に委ねる
 

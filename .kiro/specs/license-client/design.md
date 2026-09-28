@@ -356,7 +356,7 @@ pub struct LicenseMeterResult {
     pub message: Option<String>,
 }
 ```
-- `from_server` の規則: 既知の 6 コードはそのまま対応。未知のコードまたはコードなしの場合、HTTP 429 → `RateLimited`、5xx → `TemporaryFailure`、それ以外 → `UnexpectedResponse`。管理系のコード（`unauthorized`, `license_not_found`）はクライアント経路では想定外として `UnexpectedResponse`
+- `from_server` の規則: 既知の 6 コードはそのまま対応。ただし `invalid_request` は HTTP 400 のときだけ `InvalidRequest` とし、それ以外のステータス（サーバーはルーティング上のエラー 404・405 なども `invalid_request` で返す）は下記のステータス規則で判定する。この場合アダプタは説明文に `server_url` の確認を促す案内を付ける。未知のコードまたはコードなしの場合、HTTP 429 → `RateLimited`、5xx → `TemporaryFailure`、それ以外 → `UnexpectedResponse`。管理系のコード（`unauthorized`, `license_not_found`）はクライアント経路では想定外として `UnexpectedResponse`
 - Invariants: `monthly_limit == 0` を上限到達とみなさない。`remaining == None` を拒否理由にしない
 
 #### LicenseConfig

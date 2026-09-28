@@ -95,13 +95,13 @@ license_key=lk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 | 理由コード | 意味 | HTTP API（`POST /v1/analyze`） |
 |---|---|---|
-| `invalid_request` | キーの設定不備（欠落・形式不正） | 403 `license_inference_denied` |
+| `invalid_request` | キーの設定不備（欠落・形式不正。サーバーが HTTP 400 を返した場合） | 403 `license_inference_denied` |
 | `license_invalid` | ライセンス無効（未登録のキー） | 403 `license_inference_denied` |
 | `license_suspended` | 利用停止 | 403 `license_inference_denied` |
 | `monthly_limit_reached` | 当月上限到達（解析時のみ） | 403 `license_inference_denied` |
 | `rate_limited` | 要求過多（時間をおいて再試行可） | 429 `license_rate_limited` |
 | `temporary_failure` | 一時障害・到達不能・タイムアウト（時間をおいて再試行可） | 503 `license_temporarily_unavailable` |
-| `unexpected_response` | サーバー応答を解釈できない | 403 `license_inference_denied` |
+| `unexpected_response` | サーバー応答を解釈できない。接続先の不一致（404・405 など）もここに入り、`server_url` の確認を促す | 403 `license_inference_denied` |
 | `gate_not_installed` | ライセンス確認の初期化前に解析が呼ばれた（内部エラー） | 403 `license_inference_denied` |
 
 HTTP API のエラー本文の `error.message` は `<理由コード>: <説明>` の形です（例: `monthly_limit_reached: The monthly usage limit has been reached.`）。429 / 503 は時間をおいて再試行できる拒否、403 は設定やライセンス状態の見直しが必要な拒否です。

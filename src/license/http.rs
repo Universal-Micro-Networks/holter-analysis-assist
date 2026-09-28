@@ -185,6 +185,16 @@ impl ReqwestLicenseClient {
             .map(|m| truncate_chars(&self.redact(m.trim()), MAX_SERVER_MESSAGE_CHARS))
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| format!("license server returned HTTP {}", status.as_u16()));
+        let message = if code.as_deref() == Some("invalid_request")
+            && reason == LicenseFailureReason::UnexpectedResponse
+        {
+            format!(
+                "license server returned HTTP {} for this endpoint; check server_url ({message})",
+                status.as_u16()
+            )
+        } else {
+            message
+        };
         Err(self.failure(wrap, reason, message))
     }
 
@@ -703,6 +713,23 @@ mod tests {
             let failure = inference_failure(&err);
             assert_eq!(failure.reason, reason, "{code} / {status}");
             assert_eq!(failure.message, message, "{code} / {status}");
+        }
+    }
+
+    #[test]
+    fn routing_error_with_invalid_request_code_points_at_server_url() {
+        for status in [404, 405] {
+            let body = error_body("invalid_request", "The request is malformed.");
+            let err = check_err(MockResponse::new(status, body.clone()));
+            let failure = startup_failure(&err);
+            assert_eq!(failure.reason, LicenseFailureReason::UnexpectedResponse);
+            assert!(failure.message.contains("server_url"), "{failure:?}");
+            assert!(failure.message.contains(&status.to_string()), "{failure:?}");
+
+            let err = meter_err(MockResponse::new(status, body));
+            let failure = inference_failure(&err);
+            assert_eq!(failure.reason, LicenseFailureReason::UnexpectedResponse);
+            assert!(failure.message.contains("server_url"), "{failure:?}");
         }
     }
 

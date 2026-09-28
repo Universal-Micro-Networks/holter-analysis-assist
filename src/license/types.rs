@@ -64,7 +64,8 @@ impl LicenseFailureReason {
     /// anything else → unexpected response.
     pub fn from_server(code: Option<&str>, http_status: u16) -> Self {
         match code {
-            Some("invalid_request") => Self::InvalidRequest,
+            // The server also labels routing errors (404, 405, ...) invalid_request; only 400 is a key problem.
+            Some("invalid_request") if http_status == 400 => Self::InvalidRequest,
             Some("license_invalid") => Self::LicenseInvalid,
             Some("license_suspended") => Self::LicenseSuspended,
             Some("monthly_limit_reached") => Self::MonthlyLimitReached,
@@ -267,6 +268,9 @@ mod tests {
                 expected,
                 "{code} / {status}"
             );
+            if code == "invalid_request" {
+                continue;
+            }
             // The server code wins over the HTTP status when it is known.
             assert_eq!(
                 LicenseFailureReason::from_server(Some(code), 500),
@@ -287,6 +291,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn from_server_invalid_request_outside_400_is_a_routing_mismatch() {
+        for status in [404, 405, 415] {
+            assert_eq!(
+                LicenseFailureReason::from_server(Some("invalid_request"), status),
+                LicenseFailureReason::UnexpectedResponse,
+                "invalid_request / {status}"
+            );
+        }
+        assert_eq!(
+            LicenseFailureReason::from_server(Some("invalid_request"), 503),
+            LicenseFailureReason::TemporaryFailure
+        );
     }
 
     #[test]
