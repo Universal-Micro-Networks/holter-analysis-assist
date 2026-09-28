@@ -1,13 +1,16 @@
 //! Blocking HTTP adapter for the license server ([`ReqwestLicenseClient`]).
 //!
-//! Uses [`LicenseConfig`] `server_url`, timeout, and `license_key` (always sent
-//! as `Authorization: Bearer`). Endpoint paths are fixed in this adapter.
+//! Speaks the finalized client contract relative to [`LicenseConfig`] `server_url`:
+//! - `POST v1/licenses/verify` (startup check): success only on HTTP 200 with
+//!   `{"ok":true,"data":{"valid":true,..}}`
+//! - `POST v1/usage` (per-inference metering): success only on HTTP 201 with
+//!   `{"ok":true,"data":{"allowed":true,..}}`
 //!
-//! **Provisional policy (until a real license server is available):** when the
-//! server is unreachable, times out, returns non-2xx, or returns unparseable
-//! JSON, both check and meter **allow** (soft-open). An explicit JSON
-//! `allowed: false` still denies. Restore fail-closed transport mapping when
-//! the license server is production-ready.
+//! Requests carry no body; the license key travels only in
+//! `Authorization: Bearer`. Every other outcome (error envelope, non-2xx,
+//! unparseable body, transport failure, timeout) is a failure with a
+//! [`LicenseFailureReason`]; there is no fail-open path and no automatic retry
+//! (a retried usage call could be metered twice).
 //!
 //! Error / Debug output must never include the license key plaintext.
 
@@ -15,12 +18,19 @@ use super::client::LicenseClient;
 use super::config::LicenseConfig;
 use super::types::{
     LicenseCheckResult, LicenseError, LicenseFailure, LicenseFailureReason, LicenseMeterResult,
+    UsageSnapshot,
 };
-use serde::Serialize;
+use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use std::fmt;
 
-const CHECK_PATH: &str = "/v1/license/check";
-const METER_PATH: &str = "/v1/license/meter";
+const VERIFY_PATH: &str = "v1/licenses/verify";
+const USAGE_PATH: &str = "v1/usage";
+const MAX_SERVER_MESSAGE_CHARS: usize = 200;
+
+/// Wraps a failure in the call-site category (check → startup, meter → inference).
+type Wrap = fn(LicenseFailure) -> LicenseError;
 
 /// Blocking reqwest implementation of [`LicenseClient`].
 pub struct ReqwestLicenseClient {
@@ -34,6 +44,41 @@ impl fmt::Debug for ReqwestLicenseClient {
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
+}
+
+#[derive(Deserialize)]
+struct Envelope {
+    ok: bool,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<ErrorBody>,
+}
+
+#[derive(Deserialize)]
+struct ErrorBody {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VerifyData {
+    valid: bool,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    monthly_limit: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct UsageData {
+    allowed: bool,
+    used: u64,
+    monthly_limit: u64,
+    #[serde(default)]
+    remaining: Option<u64>,
 }
 
 impl ReqwestLicenseClient {
@@ -51,171 +96,173 @@ impl ReqwestLicenseClient {
     fn endpoint(&self, path: &str) -> Result<reqwest::Url, LicenseError> {
         let base = reqwest::Url::parse(&self.config.server_url)
             .map_err(|e| LicenseError::Config(format!("invalid license server_url: {e}")))?;
-        let joined = path.trim_start_matches('/');
-        base.join(joined).map_err(|e| {
+        base.join(path).map_err(|e| {
             LicenseError::Config(format!("invalid license endpoint path '{path}': {e}"))
         })
     }
 
-    fn apply_auth(
-        &self,
-        req: reqwest::blocking::RequestBuilder,
-    ) -> reqwest::blocking::RequestBuilder {
-        req.header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.config.license_key.expose_secret()),
-        )
-    }
-
-    fn post_json<B: Serialize>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<(reqwest::StatusCode, String), String> {
-        let url = self.endpoint(path).map_err(|e| e.to_string())?;
-        let req = self.http.post(url).json(body);
-        let req = self.apply_auth(req);
-        let resp = req.send().map_err(|e| sanitize_transport_message(&e))?;
+    /// Bodyless `POST` with the Bearer key; transport failures become
+    /// `temporary_failure` in the caller's category.
+    fn post(&self, path: &str, wrap: Wrap) -> Result<(StatusCode, String), LicenseError> {
+        let url = self.endpoint(path)?;
+        let resp = self
+            .http
+            .post(url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::CONTENT_LENGTH, "0")
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.config.license_key.expose_secret()),
+            )
+            .send()
+            .map_err(|e| {
+                self.failure(
+                    wrap,
+                    LicenseFailureReason::TemporaryFailure,
+                    transport_summary(&e),
+                )
+            })?;
         let status = resp.status();
-        let text = resp
-            .text()
-            .map_err(|e| format!("failed to read response body: {e}"))?;
+        let text = resp.text().map_err(|e| {
+            self.failure(
+                wrap,
+                LicenseFailureReason::TemporaryFailure,
+                format!(
+                    "failed to read license server response: {}",
+                    transport_summary(&e)
+                ),
+            )
+        })?;
         Ok((status, text))
     }
+
+    /// Interpret a response: `data` of the success envelope when the status is
+    /// exactly `success_status`, otherwise a classified failure.
+    fn interpret<T: DeserializeOwned>(
+        &self,
+        status: StatusCode,
+        text: &str,
+        success_status: StatusCode,
+        wrap: Wrap,
+    ) -> Result<T, LicenseError> {
+        let envelope = serde_json::from_str::<Envelope>(text).ok();
+        if status.is_success() {
+            let unexpected = |detail: String| {
+                self.failure(
+                    wrap,
+                    LicenseFailureReason::UnexpectedResponse,
+                    format!(
+                        "unexpected license server response (HTTP {}): {detail}",
+                        status.as_u16()
+                    ),
+                )
+            };
+            if status != success_status {
+                return Err(unexpected(format!(
+                    "expected HTTP {}",
+                    success_status.as_u16()
+                )));
+            }
+            return match envelope {
+                Some(Envelope {
+                    ok: true,
+                    data: Some(data),
+                    ..
+                }) => serde_json::from_value(data)
+                    .map_err(|e| unexpected(format!("invalid data: {e}"))),
+                Some(_) => Err(unexpected("not a success envelope".into())),
+                None => Err(unexpected("body is not a JSON envelope".into())),
+            };
+        }
+
+        let error = envelope.filter(|e| !e.ok).and_then(|e| e.error);
+        let (code, message) = match error {
+            Some(ErrorBody { code, message }) => (code, message),
+            None => (None, None),
+        };
+        let reason = LicenseFailureReason::from_server(code.as_deref(), status.as_u16());
+        let message = message
+            .map(|m| truncate_chars(&self.redact(m.trim()), MAX_SERVER_MESSAGE_CHARS))
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| format!("license server returned HTTP {}", status.as_u16()));
+        Err(self.failure(wrap, reason, message))
+    }
+
+    /// Build a wrapped failure, redacting the key if a message ever echoes it.
+    fn failure(&self, wrap: Wrap, reason: LicenseFailureReason, message: String) -> LicenseError {
+        wrap(LicenseFailure::new(reason, self.redact(&message)))
+    }
+
+    /// Must run before any truncation so a partially cut key cannot slip through.
+    fn redact(&self, text: &str) -> String {
+        let key = self.config.license_key.expose_secret();
+        if key.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(key, "***")
+        }
+    }
 }
 
-fn sanitize_transport_message(err: &reqwest::Error) -> String {
-    // reqwest errors do not include Authorization headers; keep the summary short
-    // and never append request builder state that could hold secrets.
+fn transport_summary(err: &reqwest::Error) -> String {
+    // reqwest errors carry the URL but never request headers; the key is only
+    // in the Authorization header, so the summary cannot contain it.
     if err.is_timeout() {
-        "request timed out".to_string()
-    } else if err.is_connect() {
-        format!("connection failed: {err}")
-    } else {
-        format!("transport error: {err}")
+        return "license server request timed out".to_string();
     }
+    let mut summary = format!("license server unreachable: {err}");
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        summary.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    summary
 }
 
-fn parse_allowed_response(text: &str) -> Result<(bool, Option<String>), String> {
-    #[derive(serde::Deserialize)]
-    struct Body {
-        allowed: bool,
-        #[serde(default)]
-        message: Option<String>,
-    }
-    let parsed: Body =
-        serde_json::from_str(text).map_err(|e| format!("invalid JSON response: {e}"))?;
-    Ok((parsed.allowed, parsed.message))
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
 }
 
 impl LicenseClient for ReqwestLicenseClient {
     fn check_validity(&self) -> Result<LicenseCheckResult, LicenseError> {
-        let fail = |msg: String| {
-            LicenseError::StartupFailed(LicenseFailure::new(
-                LicenseFailureReason::LicenseInvalid,
-                msg,
-            ))
-        };
-        let provisional_allow = |reason: String| {
-            eprintln!("license: provisional allow (check): {reason}");
-            Ok(LicenseCheckResult {
-                allowed: true,
-                message: Some(format!("provisional allow: {reason}")),
-                ..Default::default()
-            })
-        };
-
-        let (status, text) = match self.post_json(CHECK_PATH, &serde_json::json!({})) {
-            Ok(v) => v,
-            Err(msg) => return provisional_allow(msg),
-        };
-
-        if !status.is_success() {
-            return provisional_allow(format!(
-                "validity check HTTP {status}: {}",
-                truncate_for_error(&text)
-            ));
-        }
-
-        let (allowed, message) = match parse_allowed_response(&text) {
-            Ok(v) => v,
-            Err(msg) => return provisional_allow(msg),
-        };
-        if !allowed {
-            return Err(fail(
-                message.unwrap_or_else(|| "validity check denied".into()),
+        let wrap: Wrap = LicenseError::StartupFailed;
+        let (status, text) = self.post(VERIFY_PATH, wrap)?;
+        let data: VerifyData = self.interpret(status, &text, StatusCode::OK, wrap)?;
+        if !data.valid {
+            return Err(self.failure(
+                wrap,
+                LicenseFailureReason::UnexpectedResponse,
+                "license server returned valid=false in a success response".into(),
             ));
         }
         Ok(LicenseCheckResult {
             allowed: true,
-            message,
-            ..Default::default()
+            status: data.status,
+            monthly_limit: data.monthly_limit,
+            message: None,
         })
     }
 
     fn authorize_and_meter(&self) -> Result<LicenseMeterResult, LicenseError> {
-        let fail = |msg: String| {
-            LicenseError::InferenceDenied(LicenseFailure::new(
-                LicenseFailureReason::MonthlyLimitReached,
-                msg,
-            ))
-        };
-        let provisional_allow = |reason: String| {
-            eprintln!("license: provisional allow (meter): {reason}");
-            Ok(LicenseMeterResult {
-                allowed: true,
-                message: Some(format!("provisional allow: {reason}")),
-                ..Default::default()
-            })
-        };
-
-        #[derive(Serialize)]
-        struct MeterBody {
-            units: u32,
-            kind: &'static str,
-        }
-        let body = MeterBody {
-            units: 1,
-            kind: "analyze_job",
-        };
-
-        let (status, text) = match self.post_json(METER_PATH, &body) {
-            Ok(v) => v,
-            Err(msg) => return provisional_allow(msg),
-        };
-
-        if !status.is_success() {
-            return provisional_allow(format!(
-                "authorize and meter HTTP {status}: {}",
-                truncate_for_error(&text)
-            ));
-        }
-
-        let (allowed, message) = match parse_allowed_response(&text) {
-            Ok(v) => v,
-            Err(msg) => return provisional_allow(msg),
-        };
-        if !allowed {
-            return Err(fail(
-                message.unwrap_or_else(|| "authorize and meter denied".into()),
+        let wrap: Wrap = LicenseError::InferenceDenied;
+        let (status, text) = self.post(USAGE_PATH, wrap)?;
+        let data: UsageData = self.interpret(status, &text, StatusCode::CREATED, wrap)?;
+        if !data.allowed {
+            return Err(self.failure(
+                wrap,
+                LicenseFailureReason::UnexpectedResponse,
+                "license server returned allowed=false in a success response".into(),
             ));
         }
         Ok(LicenseMeterResult {
             allowed: true,
-            message,
-            ..Default::default()
+            usage: Some(UsageSnapshot {
+                used: data.used,
+                monthly_limit: data.monthly_limit,
+                remaining: data.remaining,
+            }),
+            message: None,
         })
-    }
-}
-
-fn truncate_for_error(text: &str) -> String {
-    const MAX: usize = 200;
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= MAX {
-        trimmed.to_string()
-    } else {
-        let truncated: String = trimmed.chars().take(MAX).collect();
-        format!("{truncated}…")
     }
 }
 
@@ -224,151 +271,162 @@ mod tests {
     use super::ReqwestLicenseClient;
     use crate::license::client::LicenseClient;
     use crate::license::config::{LicenseConfig, SecretString};
-    use crate::license::types::LicenseError;
+    use crate::license::types::{
+        LicenseError, LicenseFailure, LicenseFailureReason, UsageSnapshot,
+    };
+    use serde_json::json;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    const TEST_KEY: &str = "lk_0123456789abcdef0123456789abcdef";
 
     #[derive(Debug, Clone, Default)]
     struct CapturedRequest {
         method: String,
-        path: String,
-        authorization: Option<String>,
-        body: String,
+        target: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    impl CapturedRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
     }
 
     struct MockResponse {
-        status_line: &'static str,
+        status: u16,
         body: String,
-        /// Extra delay before writing the response (for timeout tests).
+        /// Delay before writing the response (for timeout tests).
         delay: Option<Duration>,
     }
 
-    fn spawn_mock(
-        response: MockResponse,
-    ) -> (
-        String,
-        Arc<Mutex<Option<CapturedRequest>>>,
-        thread::JoinHandle<()>,
-    ) {
+    impl MockResponse {
+        fn new(status: u16, body: impl Into<String>) -> Self {
+            Self {
+                status,
+                body: body.into(),
+                delay: None,
+            }
+        }
+
+        fn delayed(mut self, delay: Duration) -> Self {
+            self.delay = Some(delay);
+            self
+        }
+    }
+
+    type Captured = Arc<Mutex<Vec<CapturedRequest>>>;
+
+    /// Serves `response` to every connection. After the first request it keeps
+    /// accepting for a short idle window so an (unwanted) retry is recorded too.
+    fn spawn_mock(response: MockResponse) -> (String, Captured, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let addr = listener.local_addr().expect("local addr");
-        let captured = Arc::new(Mutex::new(None));
-        let captured_clone = Arc::clone(&captured);
+        listener.set_nonblocking(true).expect("nonblocking");
+        let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_t = Arc::clone(&captured);
 
         let handle = thread::spawn(move || {
-            // Bound accept so a client that never connects cannot hang the suite.
-            listener.set_nonblocking(true).ok();
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            let (mut stream, _) = loop {
+            let first_deadline = Instant::now() + Duration::from_secs(5);
+            let mut last_served: Option<Instant> = None;
+            loop {
                 match listener.accept() {
-                    Ok(conn) => break conn,
+                    Ok((stream, _)) => {
+                        serve_one(stream, &response, &captured_t);
+                        last_served = Some(Instant::now());
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if std::time::Instant::now() >= deadline {
+                        let done = match last_served {
+                            Some(t) => t.elapsed() >= Duration::from_millis(300),
+                            None => Instant::now() >= first_deadline,
+                        };
+                        if done {
                             return;
                         }
-                        thread::sleep(Duration::from_millis(20));
+                        thread::sleep(Duration::from_millis(10));
                     }
                     Err(_) => return,
                 }
-            };
-            stream.set_nonblocking(false).ok();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 1024];
-            loop {
-                match stream.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                            // If Content-Length present, wait for full body.
-                            if let Some(cl) = content_length(&buf) {
-                                if let Some(header_end) = find_header_end(&buf) {
-                                    let body_len = buf.len() - header_end;
-                                    if body_len >= cl {
-                                        break;
-                                    }
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
             }
-
-            let req = parse_http_request(&buf);
-            *captured_clone.lock().unwrap() = Some(req);
-
-            if let Some(delay) = response.delay {
-                thread::sleep(delay);
-            }
-
-            let body = response.body;
-            let resp = format!(
-                "{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response.status_line,
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes());
-            let _ = stream.flush();
         });
 
         (format!("http://{addr}"), captured, handle)
+    }
+
+    fn serve_one(mut stream: TcpStream, response: &MockResponse, captured: &Captured) {
+        stream.set_nonblocking(false).ok();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(header_end) = find_header_end(&buf) {
+                        let cl = content_length(&buf[..header_end]).unwrap_or(0);
+                        if buf.len() - header_end >= cl {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        captured.lock().unwrap().push(parse_http_request(&buf));
+
+        if let Some(delay) = response.delay {
+            thread::sleep(delay);
+        }
+        let resp = format!(
+            "HTTP/1.1 {} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.status,
+            response.body.len(),
+            response.body
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
     }
 
     fn find_header_end(buf: &[u8]) -> Option<usize> {
         buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
     }
 
-    fn content_length(buf: &[u8]) -> Option<usize> {
-        let s = String::from_utf8_lossy(buf);
-        for line in s.lines() {
-            let lower = line.to_ascii_lowercase();
-            if let Some(rest) = lower.strip_prefix("content-length:") {
-                return rest.trim().parse().ok();
-            }
-        }
-        None
+    fn content_length(head: &[u8]) -> Option<usize> {
+        String::from_utf8_lossy(head).lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
     }
 
     fn parse_http_request(buf: &[u8]) -> CapturedRequest {
-        let s = String::from_utf8_lossy(buf);
-        let (header_part, body) = match s.split_once("\r\n\r\n") {
-            Some((h, b)) => (h, b.to_string()),
-            None => (s.as_ref(), String::new()),
-        };
-        let mut lines = header_part.lines();
-        let request_line = lines.next().unwrap_or("");
-        let mut parts = request_line.split_whitespace();
-        let method = parts.next().unwrap_or("").to_string();
-        let path = parts.next().unwrap_or("").to_string();
-
-        let mut authorization = None;
-        for line in lines {
-            if let Some(rest) = line
-                .strip_prefix("Authorization:")
-                .or_else(|| line.strip_prefix("authorization:"))
-            {
-                authorization = Some(rest.trim().to_string());
-            }
-        }
-
+        let header_end = find_header_end(buf).unwrap_or(buf.len());
+        let head = String::from_utf8_lossy(&buf[..header_end]);
+        let mut lines = head.split("\r\n");
+        let mut request_line = lines.next().unwrap_or("").split_whitespace();
+        let method = request_line.next().unwrap_or("").to_string();
+        let target = request_line.next().unwrap_or("").to_string();
+        let headers = lines
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_string(), value.trim().to_string()))
+            })
+            .collect();
         CapturedRequest {
             method,
-            path,
-            authorization,
-            body,
+            target,
+            headers,
+            body: buf[header_end..].to_vec(),
         }
     }
-
-    const TEST_KEY: &str = "lk_0123456789abcdef0123456789abcdef";
 
     /// Mirrors `LicenseConfig::load_from_path` normalization (one trailing `/`).
     fn config_for(base: &str, license_key: &str, timeout: Duration) -> LicenseConfig {
@@ -379,250 +437,480 @@ mod tests {
         }
     }
 
-    #[test]
-    fn check_validity_success_posts_empty_json_to_check_path() {
-        let (base, captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 200 OK",
-            body: r#"{"allowed":true,"message":"ok"}"#.into(),
-            delay: None,
-        });
-        let client =
-            ReqwestLicenseClient::new(config_for(&base, "test-secret-key", Duration::from_secs(5)))
-                .expect("client");
+    fn client_for(base: &str) -> ReqwestLicenseClient {
+        ReqwestLicenseClient::new(config_for(base, TEST_KEY, Duration::from_secs(5)))
+            .expect("client")
+    }
 
-        let result = client.check_validity().expect("check ok");
-        assert!(result.allowed);
-        assert_eq!(result.message.as_deref(), Some("ok"));
-
+    fn requests(captured: &Captured, handle: thread::JoinHandle<()>) -> Vec<CapturedRequest> {
         handle.join().expect("mock thread");
-        let req = captured.lock().unwrap().clone().expect("captured");
-        assert_eq!(req.method, "POST");
-        assert_eq!(req.path, "/v1/license/check");
-        assert_eq!(req.authorization.as_deref(), Some("Bearer test-secret-key"));
-        let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
-        assert_eq!(body, serde_json::json!({}));
+        let reqs = captured.lock().unwrap().clone();
+        reqs
+    }
+
+    fn verify_ok(monthly_limit: u64) -> String {
+        json!({
+            "ok": true,
+            "data": {"valid": true, "status": "active", "monthly_limit": monthly_limit}
+        })
+        .to_string()
+    }
+
+    fn usage_ok(used: u64, monthly_limit: u64, remaining: Option<u64>) -> String {
+        json!({
+            "ok": true,
+            "data": {
+                "allowed": true,
+                "used": used,
+                "monthly_limit": monthly_limit,
+                "remaining": remaining,
+                "period": {
+                    "start": "2026-09-30T15:00:00Z",
+                    "end": "2026-10-31T15:00:00Z",
+                    "timezone": "Asia/Tokyo"
+                },
+                "future_field": "ignored"
+            }
+        })
+        .to_string()
+    }
+
+    fn error_body(code: &str, message: &str) -> String {
+        json!({"ok": false, "error": {"code": code, "message": message}}).to_string()
+    }
+
+    fn check_err(response: MockResponse) -> LicenseError {
+        let (base, captured, handle) = spawn_mock(response);
+        let err = client_for(&base)
+            .check_validity()
+            .expect_err("check must fail");
+        let reqs = requests(&captured, handle);
+        assert_eq!(reqs.len(), 1, "no automatic retry: {reqs:?}");
+        err
+    }
+
+    fn meter_err(response: MockResponse) -> LicenseError {
+        let (base, captured, handle) = spawn_mock(response);
+        let err = client_for(&base)
+            .authorize_and_meter()
+            .expect_err("meter must fail");
+        let reqs = requests(&captured, handle);
+        assert_eq!(reqs.len(), 1, "no automatic retry: {reqs:?}");
+        err
+    }
+
+    fn startup_failure(err: &LicenseError) -> &LicenseFailure {
+        match err {
+            LicenseError::StartupFailed(f) => f,
+            other => panic!("expected StartupFailed, got {other:?}"),
+        }
+    }
+
+    fn inference_failure(err: &LicenseError) -> &LicenseFailure {
+        match err {
+            LicenseError::InferenceDenied(f) => f,
+            other => panic!("expected InferenceDenied, got {other:?}"),
+        }
+    }
+
+    fn closed_port_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+        format!("http://{addr}")
+    }
+
+    // --- success ---
+
+    #[test]
+    fn verify_200_valid_is_success_with_status_and_monthly_limit() {
+        let (base, captured, handle) = spawn_mock(MockResponse::new(200, verify_ok(100)));
+        let result = client_for(&base).check_validity().expect("verify ok");
+        assert!(result.allowed);
+        assert_eq!(result.status.as_deref(), Some("active"));
+        assert_eq!(result.monthly_limit, Some(100));
+        assert_eq!(result.message, None);
+        assert_eq!(requests(&captured, handle).len(), 1);
     }
 
     #[test]
-    fn authorize_and_meter_success_posts_units_and_kind() {
-        let (base, captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 200 OK",
-            body: r#"{"allowed":true}"#.into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
-            .expect("client");
-
-        let result = client.authorize_and_meter().expect("meter ok");
+    fn verify_unlimited_monthly_limit_zero_is_success() {
+        let (base, _captured, handle) = spawn_mock(MockResponse::new(200, verify_ok(0)));
+        let result = client_for(&base)
+            .check_validity()
+            .expect("unlimited verify ok");
         assert!(result.allowed);
-
+        assert_eq!(result.monthly_limit, Some(0));
         handle.join().expect("mock thread");
-        let req = captured.lock().unwrap().clone().expect("captured");
-        assert_eq!(req.method, "POST");
-        assert_eq!(req.path, "/v1/license/meter");
+    }
+
+    #[test]
+    fn usage_201_allowed_is_success_with_usage_snapshot() {
+        let (base, captured, handle) =
+            spawn_mock(MockResponse::new(201, usage_ok(3, 100, Some(97))));
+        let result = client_for(&base).authorize_and_meter().expect("usage ok");
+        assert!(result.allowed);
         assert_eq!(
-            req.authorization.as_deref(),
+            result.usage,
+            Some(UsageSnapshot {
+                used: 3,
+                monthly_limit: 100,
+                remaining: Some(97),
+            })
+        );
+        assert_eq!(result.message, None);
+        assert_eq!(requests(&captured, handle).len(), 1);
+    }
+
+    #[test]
+    fn usage_unlimited_with_null_remaining_is_success() {
+        let (base, _captured, handle) = spawn_mock(MockResponse::new(201, usage_ok(42, 0, None)));
+        let result = client_for(&base)
+            .authorize_and_meter()
+            .expect("unlimited usage ok");
+        assert!(result.allowed);
+        let usage = result.usage.expect("usage snapshot");
+        assert!(usage.is_unlimited());
+        assert_eq!(usage.used, 42);
+        assert_eq!(usage.remaining, None);
+        handle.join().expect("mock thread");
+    }
+
+    // --- 2xx that does not meet the success condition ---
+
+    #[test]
+    fn usage_200_is_unexpected_response() {
+        let err = meter_err(MockResponse::new(200, usage_ok(1, 10, Some(9))));
+        assert_eq!(
+            inference_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+    }
+
+    #[test]
+    fn verify_201_is_unexpected_response() {
+        let err = check_err(MockResponse::new(201, verify_ok(10)));
+        assert_eq!(
+            startup_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+    }
+
+    #[test]
+    fn verify_valid_false_is_unexpected_response() {
+        let body =
+            json!({"ok": true, "data": {"valid": false, "status": "active", "monthly_limit": 0}});
+        let err = check_err(MockResponse::new(200, body.to_string()));
+        assert_eq!(
+            startup_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+    }
+
+    #[test]
+    fn usage_allowed_false_is_unexpected_response() {
+        let body = json!({"ok": true, "data": {"allowed": false, "used": 1, "monthly_limit": 1, "remaining": 0}});
+        let err = meter_err(MockResponse::new(201, body.to_string()));
+        assert_eq!(
+            inference_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+    }
+
+    #[test]
+    fn ok_false_on_2xx_is_unexpected_response() {
+        let err = check_err(MockResponse::new(
+            200,
+            error_body("license_invalid", "The license key is not valid."),
+        ));
+        assert_eq!(
+            startup_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+        let err = meter_err(MockResponse::new(
+            201,
+            error_body("monthly_limit_reached", "limit"),
+        ));
+        assert_eq!(
+            inference_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+    }
+
+    #[test]
+    fn legacy_contract_body_is_unexpected_response() {
+        let err = check_err(MockResponse::new(200, r#"{"allowed":true}"#));
+        assert_eq!(
+            startup_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+    }
+
+    #[test]
+    fn non_json_2xx_is_unexpected_response() {
+        let err = check_err(MockResponse::new(200, "not-json"));
+        assert_eq!(
+            startup_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+        let err = meter_err(MockResponse::new(201, "<html>ok</html>"));
+        assert_eq!(
+            inference_failure(&err).reason,
+            LicenseFailureReason::UnexpectedResponse
+        );
+    }
+
+    // --- server error codes ---
+
+    const SERVER_CODES: [(&str, u16, LicenseFailureReason); 6] = [
+        ("invalid_request", 400, LicenseFailureReason::InvalidRequest),
+        ("license_invalid", 401, LicenseFailureReason::LicenseInvalid),
+        (
+            "license_suspended",
+            403,
+            LicenseFailureReason::LicenseSuspended,
+        ),
+        (
+            "monthly_limit_reached",
+            403,
+            LicenseFailureReason::MonthlyLimitReached,
+        ),
+        ("rate_limited", 429, LicenseFailureReason::RateLimited),
+        (
+            "temporary_failure",
+            503,
+            LicenseFailureReason::TemporaryFailure,
+        ),
+    ];
+
+    #[test]
+    fn server_error_codes_map_to_reasons_as_startup_failed_on_verify() {
+        for (code, status, reason) in SERVER_CODES {
+            let message = format!("server says {code}");
+            let err = check_err(MockResponse::new(status, error_body(code, &message)));
+            let failure = startup_failure(&err);
+            assert_eq!(failure.reason, reason, "{code} / {status}");
+            assert_eq!(failure.message, message, "{code} / {status}");
+            assert!(err.to_string().contains(code), "{err}");
+        }
+    }
+
+    #[test]
+    fn server_error_codes_map_to_reasons_as_inference_denied_on_usage() {
+        for (code, status, reason) in SERVER_CODES {
+            let message = format!("server says {code}");
+            let err = meter_err(MockResponse::new(status, error_body(code, &message)));
+            let failure = inference_failure(&err);
+            assert_eq!(failure.reason, reason, "{code} / {status}");
+            assert_eq!(failure.message, message, "{code} / {status}");
+        }
+    }
+
+    #[test]
+    fn unknown_code_falls_back_to_http_status() {
+        let cases = [
+            (429, LicenseFailureReason::RateLimited),
+            (503, LicenseFailureReason::TemporaryFailure),
+            (500, LicenseFailureReason::TemporaryFailure),
+            (400, LicenseFailureReason::UnexpectedResponse),
+            (404, LicenseFailureReason::UnexpectedResponse),
+        ];
+        for (status, reason) in cases {
+            let err = check_err(MockResponse::new(
+                status,
+                error_body("brand_new_code", "new server message"),
+            ));
+            let failure = startup_failure(&err);
+            assert_eq!(failure.reason, reason, "check / {status}");
+            assert_eq!(failure.message, "new server message");
+
+            let err = meter_err(MockResponse::new(
+                status,
+                error_body("brand_new_code", "new server message"),
+            ));
+            assert_eq!(inference_failure(&err).reason, reason, "meter / {status}");
+        }
+    }
+
+    #[test]
+    fn non_json_502_is_temporary_failure_with_status_summary() {
+        let err = meter_err(MockResponse::new(502, "<html>Bad Gateway</html>"));
+        let failure = inference_failure(&err);
+        assert_eq!(failure.reason, LicenseFailureReason::TemporaryFailure);
+        assert!(failure.message.contains("HTTP 502"), "{failure:?}");
+
+        let err = check_err(MockResponse::new(502, "<html>Bad Gateway</html>"));
+        assert_eq!(
+            startup_failure(&err).reason,
+            LicenseFailureReason::TemporaryFailure
+        );
+    }
+
+    #[test]
+    fn non_json_4xx_is_unexpected_response() {
+        let err = check_err(MockResponse::new(404, "Not Found"));
+        let failure = startup_failure(&err);
+        assert_eq!(failure.reason, LicenseFailureReason::UnexpectedResponse);
+        assert!(failure.message.contains("HTTP 404"), "{failure:?}");
+    }
+
+    #[test]
+    fn error_without_message_falls_back_to_http_status_summary() {
+        let body = json!({"ok": false, "error": {"code": "license_suspended"}});
+        let err = check_err(MockResponse::new(403, body.to_string()));
+        let failure = startup_failure(&err);
+        assert_eq!(failure.reason, LicenseFailureReason::LicenseSuspended);
+        assert!(failure.message.contains("HTTP 403"), "{failure:?}");
+    }
+
+    #[test]
+    fn server_message_is_truncated_to_200_chars() {
+        let long = "x".repeat(300);
+        let err = meter_err(MockResponse::new(
+            403,
+            error_body("monthly_limit_reached", &long),
+        ));
+        let failure = inference_failure(&err);
+        assert_eq!(failure.reason, LicenseFailureReason::MonthlyLimitReached);
+        assert_eq!(failure.message.chars().count(), 200, "{failure:?}");
+        assert!(long.starts_with(&failure.message));
+    }
+
+    #[test]
+    fn echoed_key_straddling_truncation_boundary_leaves_no_fragment() {
+        let message = format!("{}{TEST_KEY} tail", "x".repeat(190));
+        let err = meter_err(MockResponse::new(
+            403,
+            error_body("monthly_limit_reached", &message),
+        ));
+        let failure = inference_failure(&err);
+        assert!(!failure.message.contains("lk_"), "{failure:?}");
+        assert!(failure.message.contains("***"), "{failure:?}");
+    }
+
+    // --- transport ---
+
+    #[test]
+    fn verify_timeout_is_temporary_failure() {
+        let (base, captured, handle) =
+            spawn_mock(MockResponse::new(200, verify_ok(0)).delayed(Duration::from_secs(3)));
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(1)))
+            .expect("client");
+        let err = client.check_validity().expect_err("timeout must fail");
+        let failure = startup_failure(&err);
+        assert_eq!(failure.reason, LicenseFailureReason::TemporaryFailure);
+        assert!(failure.message.contains("timed out"), "{failure:?}");
+        assert_eq!(requests(&captured, handle).len(), 1, "no automatic retry");
+    }
+
+    #[test]
+    fn usage_timeout_is_temporary_failure() {
+        let (base, captured, handle) = spawn_mock(
+            MockResponse::new(201, usage_ok(1, 0, None)).delayed(Duration::from_secs(3)),
+        );
+        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(1)))
+            .expect("client");
+        let err = client.authorize_and_meter().expect_err("timeout must fail");
+        let failure = inference_failure(&err);
+        assert_eq!(failure.reason, LicenseFailureReason::TemporaryFailure);
+        assert!(failure.message.contains("timed out"), "{failure:?}");
+        assert_eq!(requests(&captured, handle).len(), 1, "no automatic retry");
+    }
+
+    #[test]
+    fn unreachable_server_is_temporary_failure() {
+        let base = closed_port_url();
+        let client = client_for(&base);
+
+        let err = client.check_validity().expect_err("unreachable verify");
+        let failure = startup_failure(&err);
+        assert_eq!(failure.reason, LicenseFailureReason::TemporaryFailure);
+        assert!(failure.message.contains("unreachable"), "{failure:?}");
+
+        let err = client.authorize_and_meter().expect_err("unreachable usage");
+        assert_eq!(
+            inference_failure(&err).reason,
+            LicenseFailureReason::TemporaryFailure
+        );
+    }
+
+    // --- request shape ---
+
+    fn assert_bodyless_bearer_post(req: &CapturedRequest, expected_path: &str) {
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.target, expected_path);
+        assert_eq!(
+            req.header("authorization"),
             Some(format!("Bearer {TEST_KEY}").as_str())
         );
-        let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
-        assert_eq!(body["units"], 1);
-        assert_eq!(body["kind"], "analyze_job");
+        assert_eq!(req.header("accept"), Some("application/json"));
+        assert!(req.body.is_empty(), "body must be empty: {:?}", req.body);
+        assert_eq!(req.header("content-length"), Some("0"), "{req:?}");
+        assert!(req.header("transfer-encoding").is_none(), "{req:?}");
+        assert!(!req.target.contains(TEST_KEY), "key leaked into URL");
+        for (name, value) in &req.headers {
+            if !name.eq_ignore_ascii_case("authorization") {
+                assert!(!value.contains(TEST_KEY), "key leaked into header {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn verify_request_is_bodyless_post_with_bearer_header() {
+        let (base, captured, handle) = spawn_mock(MockResponse::new(200, verify_ok(0)));
+        client_for(&base).check_validity().expect("verify ok");
+        let reqs = requests(&captured, handle);
+        assert_eq!(reqs.len(), 1);
+        assert_bodyless_bearer_post(&reqs[0], "/v1/licenses/verify");
+    }
+
+    #[test]
+    fn usage_request_is_bodyless_post_with_bearer_header() {
+        let (base, captured, handle) = spawn_mock(MockResponse::new(201, usage_ok(1, 0, None)));
+        client_for(&base).authorize_and_meter().expect("usage ok");
+        let reqs = requests(&captured, handle);
+        assert_eq!(reqs.len(), 1);
+        assert_bodyless_bearer_post(&reqs[0], "/v1/usage");
     }
 
     #[test]
     fn server_url_path_prefix_is_kept_when_joining_endpoints() {
-        let (base, captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 200 OK",
-            body: r#"{"allowed":true}"#.into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(
-            &format!("{base}/prefix"),
-            TEST_KEY,
-            Duration::from_secs(5),
-        ))
-        .expect("client");
+        let (base, captured, handle) = spawn_mock(MockResponse::new(201, usage_ok(1, 0, None)));
+        let client = client_for(&format!("{base}/prefix"));
+        client.authorize_and_meter().expect("usage ok");
+        let reqs = requests(&captured, handle);
+        assert_eq!(reqs[0].target, "/prefix/v1/usage");
 
-        client.check_validity().expect("check ok");
-
-        handle.join().expect("mock thread");
-        let req = captured.lock().unwrap().clone().expect("captured");
-        assert_eq!(req.path, "/prefix/v1/license/check");
-    }
-
-    #[test]
-    fn check_deny_maps_to_startup_failed() {
-        let (base, _captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 200 OK",
-            body: r#"{"allowed":false,"message":"license expired"}"#.into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
-            .expect("client");
-
-        let err = client.check_validity().expect_err("deny");
-        assert!(
-            matches!(&err, LicenseError::StartupFailed(f) if f.message.contains("license expired")),
-            "{err:?}"
-        );
-        let _ = handle.join();
-    }
-
-    #[test]
-    fn meter_deny_maps_to_inference_denied() {
-        let (base, _captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 200 OK",
-            body: r#"{"allowed":false,"message":"quota exceeded"}"#.into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
-            .expect("client");
-
-        let err = client.authorize_and_meter().expect_err("deny");
-        assert!(
-            matches!(&err, LicenseError::InferenceDenied(f) if f.message.contains("quota exceeded")),
-            "{err:?}"
-        );
-        let _ = handle.join();
-    }
-
-    #[test]
-    fn check_non_2xx_is_provisional_allow() {
-        let (base, _captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 503 Service Unavailable",
-            body: r#"{"error":"down"}"#.into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
-            .expect("client");
-
-        let result = client
+        let (base, captured, handle) = spawn_mock(MockResponse::new(200, verify_ok(0)));
+        client_for(&format!("{base}/prefix/"))
             .check_validity()
-            .expect("provisional allow on non-2xx");
-        assert!(result.allowed);
-        assert!(
-            result
-                .message
-                .as_deref()
-                .unwrap_or("")
-                .contains("provisional allow"),
-            "{result:?}"
-        );
-        let _ = handle.join();
+            .expect("verify ok");
+        let reqs = requests(&captured, handle);
+        assert_eq!(reqs[0].target, "/prefix/v1/licenses/verify");
     }
 
-    #[test]
-    fn meter_non_2xx_is_provisional_allow() {
-        let (base, _captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 500 Internal Server Error",
-            body: "oops".into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
-            .expect("client");
-
-        let result = client
-            .authorize_and_meter()
-            .expect("provisional allow on non-2xx");
-        assert!(result.allowed);
-        let _ = handle.join();
-    }
-
-    #[test]
-    fn check_timeout_is_provisional_allow() {
-        let (base, _captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 200 OK",
-            body: r#"{"allowed":true}"#.into(),
-            delay: Some(Duration::from_secs(3)),
-        });
-        let client =
-            ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_millis(200)))
-                .expect("client");
-
-        let result = client
-            .check_validity()
-            .expect("provisional allow on timeout");
-        assert!(result.allowed);
-        assert!(
-            result
-                .message
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase()
-                .contains("timed out")
-                || result
-                    .message
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains("timeout")
-                || result
-                    .message
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("provisional allow"),
-            "{result:?}"
-        );
-        let _ = handle.join();
-    }
-
-    #[test]
-    fn meter_transport_fail_is_provisional_allow() {
-        // Nothing listening on this port.
-        let client = ReqwestLicenseClient::new(config_for(
-            "http://127.0.0.1:1",
-            TEST_KEY,
-            Duration::from_millis(500),
-        ))
-        .expect("client");
-
-        let result = client
-            .authorize_and_meter()
-            .expect("provisional allow on transport fail");
-        assert!(result.allowed);
-    }
+    // --- secrets ---
 
     #[test]
     fn errors_and_debug_never_contain_license_key_plaintext() {
-        let secret = "super-secret-license-key-must-not-leak";
-        let (base, _captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 401 Unauthorized",
-            body: r#"{"allowed":false}"#.into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(&base, secret, Duration::from_secs(5)))
-            .expect("client");
+        let client_dbg = format!("{:?}", client_for("http://127.0.0.1:9"));
+        assert!(!client_dbg.contains(TEST_KEY), "{client_dbg}");
 
-        let debug = format!("{client:?}");
-        assert!(
-            !debug.contains(secret),
-            "Debug must not leak license_key: {debug}"
-        );
-        assert!(debug.contains("***") || !debug.to_lowercase().contains("super-secret"));
-
-        let result = client.check_validity().expect("401 is provisional allow");
-        assert!(result.allowed);
-        let display = format!("{result:?}");
-        let err_dbg = format!("{client:?}");
-        assert!(!display.contains(secret), "result leaked: {display}");
-        assert!(!err_dbg.contains(secret), "client Debug leaked: {err_dbg}");
-        let _ = handle.join();
-    }
-
-    #[test]
-    fn invalid_json_response_is_provisional_allow() {
-        let (base, _captured, handle) = spawn_mock(MockResponse {
-            status_line: "HTTP/1.1 200 OK",
-            body: "not-json".into(),
-            delay: None,
-        });
-        let client = ReqwestLicenseClient::new(config_for(&base, TEST_KEY, Duration::from_secs(5)))
-            .expect("client");
-
-        let result = client
-            .check_validity()
-            .expect("provisional allow on bad JSON");
-        assert!(result.allowed);
-        let _ = handle.join();
+        let echoing = error_body("license_invalid", &format!("bad key {TEST_KEY}"));
+        let errors = vec![
+            check_err(MockResponse::new(401, echoing.clone())),
+            meter_err(MockResponse::new(401, echoing)),
+            check_err(MockResponse::new(500, format!("trace: {TEST_KEY}"))),
+            meter_err(MockResponse::new(200, "not-json")),
+            client_for(&closed_port_url())
+                .check_validity()
+                .expect_err("unreachable"),
+        ];
+        for err in errors {
+            let display = err.to_string();
+            let debug = format!("{err:?}");
+            assert!(!display.contains(TEST_KEY), "Display leaked key: {display}");
+            assert!(!debug.contains(TEST_KEY), "Debug leaked key: {debug}");
+        }
     }
 }

@@ -9,20 +9,17 @@
 //! - A run prints the Markdown summary to stdout and exits 0; errors exit 1;
 //!   a failed threshold exits 2.
 
+mod common;
+
 use assert_cmd::Command;
+use common::license_mock::LicenseMockServer;
 use holter_analysis_assist::accel_compare::report::{REPORT_JSON, REPORT_MARKDOWN};
 use holter_analysis_assist::accel_compare::DEFAULT_REPORT_DIR;
 use holter_analysis_assist::inference_options::{BatchSize, CudaTuning};
 use holter_analysis_assist::phase2::{ExecutionProviderKind, InferenceOptions, Phase2Model};
 use holter_analysis_assist::preprocess::EXPECTED_24H_SAMPLES_250;
 use predicates::prelude::*;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 use tempfile::TempDir;
 
 /// clap usage errors exit with 2; license / comparison errors exit with 1.
@@ -215,73 +212,9 @@ fn boundary_values_pass_parsing_and_reach_license_check() {
     }
 }
 
-struct MockLicenseServer {
-    base_url: String,
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl MockLicenseServer {
-    fn spawn_allowing() -> Self {
-        let body = r#"{"allowed":true}"#;
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock license");
-        let addr = listener.local_addr().expect("local addr");
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_thread = Arc::clone(&stop);
-
-        let handle = thread::spawn(move || {
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking mock listener");
-            while !stop_thread.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false).ok();
-                        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-                        let mut buf = [0u8; 4096];
-                        let _ = stream.read(&mut buf);
-                        let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = stream.write_all(resp.as_bytes());
-                        let _ = stream.flush();
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Self {
-            base_url: format!("http://{addr}"),
-            stop,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for MockLicenseServer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-fn write_license_ini(dir: &Path, server_url: &str) -> PathBuf {
+fn write_license_ini(dir: &Path, mock: &LicenseMockServer) -> PathBuf {
     let path = dir.join("license.ini");
-    std::fs::write(
-        &path,
-        format!(
-            "[license]\nserver_url={server_url}\nlicense_key=lk_0123456789abcdef0123456789abcdef\ntimeout_secs=5\n"
-        ),
-    )
-    .expect("write license.ini");
+    std::fs::write(&path, mock.license_ini_section()).expect("write license.ini");
     path
 }
 
@@ -311,7 +244,7 @@ fn tiny_dynamic_fixture() -> PathBuf {
 
 /// Mock license server + synthetic ECL + report dir for one real run.
 struct RunEnv {
-    _mock: MockLicenseServer,
+    _mock: LicenseMockServer,
     dir: TempDir,
     ini: PathBuf,
     ecl: PathBuf,
@@ -319,9 +252,9 @@ struct RunEnv {
 
 impl RunEnv {
     fn new() -> Self {
-        let mock = MockLicenseServer::spawn_allowing();
+        let mock = LicenseMockServer::start();
         let dir = TempDir::new().expect("tempdir");
-        let ini = write_license_ini(dir.path(), &mock.base_url);
+        let ini = write_license_ini(dir.path(), &mock);
         let ecl = write_synthetic_ecl(dir.path());
         Self {
             _mock: mock,

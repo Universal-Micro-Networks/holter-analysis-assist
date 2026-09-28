@@ -144,7 +144,7 @@
   - _Requirements: 7.3, 11.7, 11.8_
 
 - [ ] 8. Integration: 確定契約への切り替え
-- [ ] 8.1 HTTP アダプタを確定契約に切り替え、暫定許可を撤廃し、結合テストを共通モックへ移行する
+- [x] 8.1 HTTP アダプタを確定契約に切り替え、暫定許可を撤廃し、結合テストを共通モックへ移行する
   - アダプタを切り替えると旧契約のモックが一斉に使えなくなるため、アダプタと結合テストの移行を 1 つの統合タスクとして同時に行う
   - 有効性確認と利用記録を確定したエンドポイントへ本文なしで送り、キーは認証ヘッダだけに載せる
   - 共通応答形式を解釈し、成功条件（確認は 200・有効、記録は 201・許可）を満たさない応答・非 2xx・通信失敗・タイムアウトをすべて理由付きの失敗にする。自動リトライはしない
@@ -187,3 +187,5 @@
 
 - `cargo check --no-default-features --features embedded-model` は build.rs が `HOLTER_EMBEDDED_MODEL_PATH` を要求する。ローカル検証ではダミーファイルを指定するか、`cargo check --no-default-features` で代替する（6.1）
 - 6.1 の暫定理由: 旧 HTTP アダプタの `allowed:false` は確認=license_invalid、記録=monthly_limit_reached。8.1 で確定契約の解釈に置き換える
+- 8.1 後、手動確認スクリプト `tools/check_cli_embed_select.sh` の内蔵モックが旧契約（`{"allowed":true}`）のままで起動に失敗する。8.2 で確定契約の応答に追従させる
+- reqwest は本文なし POST に Content-Length を付けないため、アダプタで `Content-Length: 0` を明示している（411 を返すフロントエンド対策）

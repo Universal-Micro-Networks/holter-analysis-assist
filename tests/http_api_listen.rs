@@ -7,122 +7,20 @@
 //! Manual smoke with a real license server and `release-embedded-http-api`
 //! artifact is documented in `config/http.ini.example` (task 5.3; not CI-required).
 //!
-//! Reuses the local mock license HTTP server pattern from `cli_license_startup.rs`.
+//! Uses the shared mock license server (`tests/common/license_mock.rs`, finalized contract).
+
+mod common;
 
 use assert_cmd::cargo::cargo_bin;
+use common::license_mock::{license_ini_section, LicenseMockServer, MockResponse};
 use predicates::prelude::*;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-/// Persistent mock: check vs meter paths return JSON; meter hits are counted.
-struct MockLicenseServer {
-    base_url: String,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-    meter_hits: Arc<AtomicUsize>,
-    check_hits: Arc<AtomicUsize>,
-}
-
-impl MockLicenseServer {
-    fn spawn(check_allowed: bool, meter_allowed: bool) -> Self {
-        let check_body = if check_allowed {
-            r#"{"allowed":true,"message":"ok"}"#.to_string()
-        } else {
-            r#"{"allowed":false,"message":"license expired"}"#.to_string()
-        };
-        let meter_body = if meter_allowed {
-            r#"{"allowed":true,"message":"metered"}"#.to_string()
-        } else {
-            r#"{"allowed":false,"message":"quota exceeded"}"#.to_string()
-        };
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock license");
-        let addr = listener.local_addr().expect("local addr");
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_thread = Arc::clone(&stop);
-        let meter_hits = Arc::new(AtomicUsize::new(0));
-        let check_hits = Arc::new(AtomicUsize::new(0));
-        let meter_hits_t = Arc::clone(&meter_hits);
-        let check_hits_t = Arc::clone(&check_hits);
-
-        let handle = thread::spawn(move || {
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking mock listener");
-            while !stop_thread.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false).ok();
-                        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-                        let mut buf = [0u8; 8192];
-                        let n = stream.read(&mut buf).unwrap_or(0);
-                        let req = String::from_utf8_lossy(&buf[..n]);
-                        let is_meter = req.contains("/v1/license/meter");
-                        let is_check = req.contains("/v1/license/check");
-                        if is_meter {
-                            meter_hits_t.fetch_add(1, Ordering::SeqCst);
-                        }
-                        if is_check {
-                            check_hits_t.fetch_add(1, Ordering::SeqCst);
-                        }
-                        let body = if is_meter {
-                            meter_body.as_str()
-                        } else {
-                            check_body.as_str()
-                        };
-                        let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = stream.write_all(resp.as_bytes());
-                        let _ = stream.flush();
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Self {
-            base_url: format!("http://{addr}"),
-            stop,
-            handle: Some(handle),
-            meter_hits,
-            check_hits,
-        }
-    }
-
-    fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    fn meter_hits(&self) -> usize {
-        self.meter_hits.load(Ordering::SeqCst)
-    }
-
-    fn check_hits(&self) -> usize {
-        self.check_hits.load(Ordering::SeqCst)
-    }
-}
-
-impl Drop for MockLicenseServer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
 
 fn free_bind_addr() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
@@ -176,11 +74,12 @@ fn write_merged_ini_opts(
              provider=cpu\n\
              {}\
              \n\
-             [license]\n\
-             server_url={server_url}\n\
-             license_key=lk_0123456789abcdef0123456789abcdef\n\
-             timeout_secs=5\n",
-            opts.max_body_bytes, opts.request_timeout_secs, opts.model_path, opts.extra_http
+             {}",
+            opts.max_body_bytes,
+            opts.request_timeout_secs,
+            opts.model_path,
+            opts.extra_http,
+            license_ini_section(server_url)
         ),
     )
     .expect("write ini");
@@ -328,7 +227,10 @@ fn wait_for_health(addr: &str, timeout: Duration) -> Result<(u16, Vec<u8>), Stri
 
 #[test]
 fn startup_license_denied_exits_nonzero_and_does_not_listen() {
-    let mock = MockLicenseServer::spawn(false, true);
+    let mock = LicenseMockServer::with_responses(
+        MockResponse::error("license_invalid"),
+        MockResponse::unlimited(),
+    );
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini(&dir, &bind, mock.base_url());
@@ -347,8 +249,7 @@ fn startup_license_denied_exits_nonzero_and_does_not_listen() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         predicate::str::contains("startup failed")
-            .or(predicate::str::contains("license expired"))
-            .or(predicate::str::contains("license"))
+            .and(predicate::str::contains("license_invalid"))
             .eval(&stderr),
         "startup failure must be identifiable: {stderr}"
     );
@@ -359,15 +260,15 @@ fn startup_license_denied_exits_nonzero_and_does_not_listen() {
         "must not listen on {bind} when startup license check fails"
     );
     assert!(
-        mock.check_hits() >= 1,
+        mock.verify_hits() >= 1,
         "startup must have called license check"
     );
-    assert_eq!(mock.meter_hits(), 0, "startup path must not meter");
+    assert_eq!(mock.usage_hits(), 0, "startup path must not meter");
 }
 
 #[test]
 fn startup_license_ok_listens_and_health_returns_200() {
-    let mock = MockLicenseServer::spawn(true, true);
+    let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini(&dir, &bind, mock.base_url());
@@ -391,9 +292,9 @@ fn startup_license_ok_listens_and_health_returns_200() {
     assert_eq!(status, 200, "body={}", String::from_utf8_lossy(&body));
     let v: serde_json::Value = serde_json::from_slice(&body).expect("health json");
     assert_eq!(v["status"], "ok");
-    assert!(mock.check_hits() >= 1);
+    assert!(mock.verify_hits() >= 1);
     assert_eq!(
-        mock.meter_hits(),
+        mock.usage_hits(),
         0,
         "health must not trigger license meter"
     );
@@ -401,7 +302,7 @@ fn startup_license_ok_listens_and_health_returns_200() {
 
 #[test]
 fn startup_missing_model_exits_nonzero_and_does_not_listen() {
-    let mock = MockLicenseServer::spawn(true, true);
+    let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let missing = dir.path().join("missing-model.onnx");
@@ -440,7 +341,7 @@ fn startup_missing_model_exits_nonzero_and_does_not_listen() {
 
 #[test]
 fn startup_logs_model_ready_with_configured_batch_before_listening() {
-    let mock = MockLicenseServer::spawn(true, true);
+    let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini_opts(
@@ -483,14 +384,14 @@ fn startup_logs_model_ready_with_configured_batch_before_listening() {
 
 #[test]
 fn analyze_request_meters_once_via_canonical_entry() {
-    let mock = MockLicenseServer::spawn(true, true);
+    let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini(&dir, &bind, mock.base_url());
 
     let _child = spawn_ready(&ini, &bind);
 
-    let before = mock.meter_hits();
+    let before = mock.usage_hits();
     let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", b"placeholder");
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
@@ -501,7 +402,7 @@ fn analyze_request_meters_once_via_canonical_entry() {
         String::from_utf8_lossy(&body)
     );
     assert_eq!(
-        mock.meter_hits().saturating_sub(before),
+        mock.usage_hits().saturating_sub(before),
         1,
         "exactly one meter call per analyze request (no HTTP-layer double meter)"
     );
@@ -509,13 +410,13 @@ fn analyze_request_meters_once_via_canonical_entry() {
 
 #[test]
 fn analyze_invalid_input_returns_400_without_meter() {
-    let mock = MockLicenseServer::spawn(true, true);
+    let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini(&dir, &bind, mock.base_url());
     let _child = spawn_ready(&ini, &bind);
 
-    let before = mock.meter_hits();
+    let before = mock.usage_hits();
     let req = multipart_analyze_request("not-an-ecl.txt", b"not-ecl-bytes");
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
@@ -528,7 +429,7 @@ fn analyze_invalid_input_returns_400_without_meter() {
     let v: serde_json::Value = serde_json::from_slice(&body).expect("error json");
     assert_eq!(v["error"]["code"], "invalid_input");
     assert_eq!(
-        mock.meter_hits().saturating_sub(before),
+        mock.usage_hits().saturating_sub(before),
         0,
         "invalid input must not reach canonical meter"
     );
@@ -536,13 +437,16 @@ fn analyze_invalid_input_returns_400_without_meter() {
 
 #[test]
 fn analyze_meter_deny_returns_403_without_result_leak() {
-    let mock = MockLicenseServer::spawn(true, false);
+    let mock = LicenseMockServer::with_responses(
+        MockResponse::unlimited(),
+        MockResponse::error("monthly_limit_reached"),
+    );
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini(&dir, &bind, mock.base_url());
     let _child = spawn_ready(&ini, &bind);
 
-    let before = mock.meter_hits();
+    let before = mock.usage_hits();
     let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", b"placeholder");
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
@@ -555,11 +459,17 @@ fn analyze_meter_deny_returns_403_without_result_leak() {
     let v: serde_json::Value = serde_json::from_slice(&body).expect("error json");
     assert_eq!(v["error"]["code"], "license_inference_denied");
     assert!(
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("monthly_limit_reached")),
+        "denial reason must be shown: {v}"
+    );
+    assert!(
         v.get("rows").is_none() && v.get("summary").is_none(),
         "denied response must not leak analyze results: {v}"
     );
     assert_eq!(
-        mock.meter_hits().saturating_sub(before),
+        mock.usage_hits().saturating_sub(before),
         1,
         "deny still meters once inside canonical entry; HTTP must not double-meter"
     );
@@ -567,7 +477,7 @@ fn analyze_meter_deny_returns_403_without_result_leak() {
 
 #[test]
 fn analyze_oversized_body_returns_413_without_meter() {
-    let mock = MockLicenseServer::spawn(true, true);
+    let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini_opts(
@@ -581,7 +491,7 @@ fn analyze_oversized_body_returns_413_without_meter() {
     );
     let _child = spawn_ready(&ini, &bind);
 
-    let before = mock.meter_hits();
+    let before = mock.usage_hits();
     // Actual ECL payload exceeds configured max_body_bytes (64).
     // Rejection may come from Content-Length check (JSON envelope) or
     // axum DefaultBodyLimit (413 without body); either is fail-closed.
@@ -601,7 +511,7 @@ fn analyze_oversized_body_returns_413_without_meter() {
         }
     }
     assert_eq!(
-        mock.meter_hits().saturating_sub(before),
+        mock.usage_hits().saturating_sub(before),
         0,
         "oversized body must not meter"
     );
@@ -628,7 +538,7 @@ fn analyze_success_returns_csv_and_meters_once_when_sample_present() {
         .and_then(|s| s.to_str())
         .expect("ecl basename");
 
-    let mock = MockLicenseServer::spawn(true, true);
+    let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let onnx_abs = onnx.canonicalize().expect("onnx path");
@@ -645,7 +555,7 @@ fn analyze_success_returns_csv_and_meters_once_when_sample_present() {
     );
     let _child = spawn_ready(&ini, &bind);
 
-    let before = mock.meter_hits();
+    let before = mock.usage_hits();
     let req = multipart_analyze_request_with_fields(
         ecl_name,
         &ecl_bytes,
@@ -666,7 +576,7 @@ fn analyze_success_returns_csv_and_meters_once_when_sample_present() {
         &csv[..csv.len().min(200)]
     );
     assert_eq!(
-        mock.meter_hits().saturating_sub(before),
+        mock.usage_hits().saturating_sub(before),
         1,
         "one successful analyze → one meter"
     );
