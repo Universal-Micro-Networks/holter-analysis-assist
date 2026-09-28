@@ -4,6 +4,8 @@
 
 検査会社向けホルター不整脈 AI（Holter Analysis Assist）の商用ライセンス運用のため、本製品は別プロジェクトのライセンスサーバーに対するクライアントとして、プロセス起動時の有効性確認と、1 推論ごとの許可確認・利用計上を行う。ライセンスサーバー本体・課金・管理 UI は本リポの範囲外とし、本仕様はクライアント振る舞いと設定項目に限定する。
 
+**改訂（2026-09-29）:** ライセンスサーバー（別リポ `holter-analysis-assist-license-server`）のクライアント向け仕様が確定したため、合意済みの契約（起動時の有効性確認、推論 1 回分の利用記録、ライセンスキーによる認証、失敗区分）に追従する。あわせて、サーバー未整備の間に入れていた「到達できない場合は暫定で許可する」扱いを撤廃し、本来の fail-closed に戻す。
+
 ## Boundary Context
 
 - **In scope**:
@@ -17,16 +19,21 @@
   - テスト時にライセンスサーバー実体へ依存しない検証手段
   - Windows / Linux で同一設定キーを用いること
   - ini に置く秘密情報の取り扱い（権限・ログマスク）の運用上の期待
+  - 確定したライセンスサーバー契約への追従（起動時の有効性確認、推論直前の利用記録、ライセンスキー必須、失敗区分の識別、月間上限なしライセンスの扱い）
+  - 暫定許可（サーバー到達不能・タイムアウト・非成功応答でも許可）の撤廃
 - **Out of scope**:
   - ライセンスサーバー実装、課金・請求・管理画面
   - オフライン運用（サーバー到達必須）
   - ONNX window 単位での都度計上
   - モデル埋め込み、HTTP API のリソース設計、配布パッケージ
+  - 当月の利用状況（使用回数・残り回数）の照会と画面表示（サーバー側には照会手段があるが、本改訂では利用しない）
+  - 運営者向けの管理用 API（ライセンス発行・停止等。管理用トークンで認証する別系統）
 - **Adjacent expectations**:
-  - 上流: 別リポのライセンスサーバーが、合意した契約（到達先・認証・成功/失敗の意味）で応答すること
+  - 上流: 別リポのライセンスサーバーが、合意した契約（到達先・認証・成功/失敗の意味）で応答すること。契約の正本はサーバー側リポのクライアント向けルート定義とする
   - 下流: CLI および将来の `http-api` が、同一のプロセス全体 `LicenseGate`（起動時 install）と、正本解析入口での推論時ゲートを通ること
   - 隣接 `model-embedding`: 正本公開入口 `analyze_ecl_with_source` と `ModelSource` を定義する。本仕様はゲート挿入を所有し、実装順は embedding → license
-  - 隣接 `http-api`: `[http]` 設定とルートを所有。本仕様の `[license]` 正本と Gate 契約を消費し、ハンドラ側で追加 meter しない
+  - 隣接 `http-api`: `[http]` 設定とルートを所有。本仕様の `[license]` 正本と Gate 契約を消費し、ハンドラ側で追加 meter しない。本改訂で追加する拒否理由の区分（Requirement 11）を、API 呼出側が識別できる形で応答に反映する
+  - 隣接 `inference-acceleration`: 比較サブコマンドは ECL あたり 2 回（基準と候補）正本入口を通るため、利用記録も 2 回となる（本改訂で変わらない）
   - 隣接 `packaging-distribution`: 配布時に `config/license.ini.example`（または同等）をコピー／参照するのみ。`[license]` キーを再定義しない
 
 ## Requirements
@@ -95,7 +102,7 @@
 #### Acceptance Criteria
 
 1. The Holter Analysis Assist shall ライセンスサーバーへの実通信を差し替え可能な境界を提供する
-2. When テストがモック境界を用いる, the Holter Analysis Assist shall 外部ライセンスサーバーへ到達せずに、成功・拒否・通信失敗などの応答パターンを再現できる
+2. When テストがモック境界を用いる, the Holter Analysis Assist shall 外部ライセンスサーバーへ到達せずに、成功・拒否・通信失敗などの応答パターン（Requirement 11 の各拒否理由と、月間上限なしの成功を含む）を再現できる
 3. The Holter Analysis Assist shall 起動時確認と推論時確認の両方について、モック境界経由の自動テストで検証可能である
 
 ### Requirement 7: 秘密情報の取り扱い
@@ -117,6 +124,8 @@
 1. The Holter Analysis Assist shall 初期対象として、ライセンスサーバーへ到達できない環境での解析継続（オフライン運用）を提供しない
 2. The Holter Analysis Assist shall ライセンスサーバー実装、課金・請求、管理画面を本機能の成果として提供しない
 3. The Holter Analysis Assist shall モデル埋め込み、HTTP API のリソース設計、配布パッケージの所有権を本機能に含めない（ただし共有ファイルへのゲート挿入、および `[license]` 正本の提供は本機能の範囲内）
+4. If ライセンスサーバーへ到達できない、時間内に応答しない、または成功以外を応答する, the Holter Analysis Assist shall 暫定的な許可を行わず、起動または推論を拒否する
+5. The Holter Analysis Assist shall 当月の利用状況（使用回数・残り回数）の照会と表示、および運営者向け管理用 API の利用を本改訂の成果として提供しない
 
 ### Requirement 9: プロセス全体ゲートと fail-closed 注入
 
@@ -128,3 +137,44 @@
 2. When 正本公開入口 `analyze_ecl_with_source` が推論を開始する, the Holter Analysis Assist shall インストール済みゲートを `global` / `try_global` 相当で取得し、許可確認・利用計上を行う（解析関数への Gate 引数追加を v1 では行わない）
 3. If 計上が必要な経路でゲートが未インストールである, the Holter Analysis Assist shall fail-closed で当該推論を拒否する
 4. The Holter Analysis Assist shall HTTP 起動経路も CLI と同一のインストール契約を用いることを、隣接仕様向け契約として文書化する
+
+### Requirement 10: 確定したライセンスサーバー契約への追従
+
+**Objective:** As a ライセンス管理者, I want クライアントが確定したライセンスサーバー契約どおりに有効性確認と利用記録を行う, so that サーバー側の利用回数集計と上限制御がそのまま機能する
+
+#### Acceptance Criteria
+
+1. When プロセスが起動する, the Holter Analysis Assist shall ライセンスサーバーの有効性確認を呼び出し、サーバーがライセンスを有効と応答した場合にのみ起動を続行する
+2. When 1 推論が開始される, the Holter Analysis Assist shall 推論の直前にライセンスサーバーへ推論 1 回分の利用記録を要求し、サーバーが利用記録の成功を応答した場合にのみ当該推論を実行する
+3. If ライセンスサーバーが利用記録の成功以外を応答する, the Holter Analysis Assist shall 当該推論を実行しない
+4. The Holter Analysis Assist shall ライセンスサーバーへの要求に、推論の入力（心電図データ）と解析結果を含めない
+5. The Holter Analysis Assist shall ライセンスキーを要求の認証情報としてのみ送信し、要求先の URL や要求本文に含めない
+6. If ライセンスサーバーの応答が合意した形式として解釈できない, the Holter Analysis Assist shall 当該の起動または推論を拒否する
+7. The Holter Analysis Assist shall 利用の日時と月の区切りをライセンスサーバー側の判定に委ね、クライアント側の時計で許可・拒否を判定しない
+
+### Requirement 11: 拒否理由の区分
+
+**Objective:** As an 運用オペレータ, I want ライセンスによる拒否の理由を区別できる, so that キーの設定誤り・利用停止・上限到達・一時障害のどれかを判断して次の行動を取れる
+
+#### Acceptance Criteria
+
+1. When ライセンスサーバーがキーの欠落または形式不正を応答する, the Holter Analysis Assist shall 拒否理由を「キーの設定不備」として識別できる形で提示する
+2. When ライセンスサーバーが未登録のキーであると応答する, the Holter Analysis Assist shall 拒否理由を「ライセンス無効」として識別できる形で提示する
+3. When ライセンスサーバーが利用停止中であると応答する, the Holter Analysis Assist shall 拒否理由を「利用停止」として識別できる形で提示する
+4. When ライセンスサーバーが当月の上限到達を応答する, the Holter Analysis Assist shall 当該推論を拒否し、拒否理由を「当月上限到達」として識別できる形で提示する
+5. When ライセンスサーバーが要求過多を応答する, the Holter Analysis Assist shall 当該の起動または推論を拒否し、拒否理由を「要求過多（時間をおいて再試行）」として識別できる形で提示する
+6. If ライセンスサーバーが一時的な障害を応答する、到達できない、または設定した時間内に応答しない, the Holter Analysis Assist shall 当該の起動または推論を拒否し、拒否理由を「一時障害（時間をおいて再試行）」として識別できる形で提示する
+7. Where 推論が HTTP API 経由で要求される場合, the Holter Analysis Assist shall API 呼出側が、時間をおいて再試行できる拒否（要求過多・一時障害）と、それ以外の拒否を区別できる応答を返す
+8. The Holter Analysis Assist shall 拒否理由の提示に、ライセンスサーバーが返した説明文を秘密情報を含まない範囲で含める
+
+### Requirement 12: ライセンスキー設定と月間上限なしライセンス
+
+**Objective:** As an 運用オペレータ, I want ライセンスキーの設定方法が明確で、上限なしライセンスが誤って拒否されない, so that 発行されたライセンスをそのまま運用できる
+
+#### Acceptance Criteria
+
+1. The Holter Analysis Assist shall ライセンスキーを `[license]` セクションの `license_key` から読み取る
+2. If `license_key` が未設定または空である, the Holter Analysis Assist shall 起動時確認を失敗扱いとし、キーが未設定であることを提示して起動を拒否する
+3. If `[license]` セクションに旧設定名 `api_key` だけが書かれている, the Holter Analysis Assist shall `api_key` をライセンスキーとして使わず、`license_key` への書き換えが必要であることを提示して起動を拒否する
+4. When ライセンスサーバーが月間上限 0（上限なし）のライセンスを有効と応答する, the Holter Analysis Assist shall そのライセンスを上限なしとして扱い、上限 0 を理由に起動または推論を拒否しない
+5. When 上限なしライセンスで利用記録が成功する, the Holter Analysis Assist shall 残り回数が示されないことを理由に当該推論を拒否しない

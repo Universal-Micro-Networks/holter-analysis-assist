@@ -104,6 +104,48 @@
 - 秘密情報のログ漏れ — Display/Debug で api_key をマスク。テストで検証
 - 起動チェックが全サブコマンドに効く — InferWindow 開発時もサーバー到達が必要。開発用モックまたはテスト専用差し替えで緩和（本番は fail-closed）
 
+## 改訂調査（2026-09-29）: 確定したサーバー契約への追従
+
+- **Discovery Scope**: Extension（light）。既存の `src/license/` 実装と、別リポ `holter-analysis-assist-license-server` のクライアント向け実装を突き合わせた
+- **Sources Consulted**: サーバー側 `src/license_server/http/{client_routes,responses,auth,dto,dependencies}.py`, `domain/{errors,license_key}.py`, `app.py`（エラーハンドラ）。本リポ `src/license/*.rs`, `src/http/error.rs`, `static/console/console.js`, 既存結合テスト 7 ファイル
+- **Findings**:
+  - エンドポイントは `POST /v1/licenses/verify`（200）、`POST /v1/usage`（201）、`GET /v1/usage/current`（200）。本文は読まれない。キーは `Authorization: Bearer`
+  - 応答は `{"ok":true,"data":{...}}` / `{"ok":false,"error":{"code","message"}}`。ステータス対応は `responses.py` の表（400/401/403/403/429/503。管理系は 401 unauthorized・404 license_not_found）
+  - 予期しない例外とリポジトリ障害はすべて 503 `temporary_failure`。Flask の HTTPException（404 など）は `invalid_request` コードで元のステータスを返す
+  - エラー文言は固定の英文（`domain/errors.py`）で、他ライセンスの存在や内部情報を含まない → クライアントのメッセージにそのまま載せてよい
+  - キー形式は `lk_[0-9a-f]{32}`。形式不正は `invalid_request`
+  - 上限 0 は上限なし（`remaining: null`, `monthly_limit: 0`）
+  - UI コンソールは `error.code` と `error.message` を連結表示するだけで、コード別の分岐はない
+  - 既存の結合テストはそれぞれ独自のモックサーバー（暫定契約）を持っている
+- **Implications**: アダプタの全面更新、エラー型への理由区分の追加、設定スキーマの変更、HTTP エラー対応付けの追加、テスト用モックの共通化が必要
+
+### Decision: 理由区分はサーバーのエラーコードをそのまま使う
+- **Context**: 要件 11 で拒否理由の識別が必要
+- **Alternatives Considered**: (1) 日本語ラベルの独自区分 (2) サーバーコード + クライアント独自コード
+- **Selected Approach**: (2)。`invalid_request` などサーバーの 6 コードに、`unexpected_response` と `gate_not_installed` を加える
+- **Rationale**: サーバー文書・管理画面・ログと同じ語で切り分けられる。既存メッセージは英語で統一されている
+- **Trade-offs**: 利用者向けの日本語説明は README で補う
+
+### Decision: エンドポイントを ini で変更できないようにする（`check_path` / `meter_path` 廃止）
+- **Context**: 初版は契約未確定のためパスを ini で上書き可能にしていた
+- **Alternatives Considered**: (1) キー名を保ったまま既定値を変更 (2) 廃止してエラー (3) 廃止して黙って無視
+- **Selected Approach**: (2)
+- **Rationale**: 旧パスが残った ini のまま動かすと、サーバーは 404 を `invalid_request` コードで返すため「キー設定不備」と誤判定される。明示的なエラーの方が切り分けやすい。接頭辞付きの配置は `server_url` 側で表現できる（末尾スラッシュ正規化）
+- **Trade-offs**: 旧 ini はそのままでは起動しない（`license_key` 必須化と同時なので、書き換えは 1 回で済む）
+
+### Decision: 永続的な拒否は 403 のまま、再試行可能な拒否だけ 429 / 503 に分ける
+- **Context**: 要件 11.7（API 呼出側が再試行可否を区別できる）
+- **Alternatives Considered**: (1) 全理由に個別の HTTP コード・`error.code` (2) 再試行可否の 2 系統のみ分ける
+- **Selected Approach**: (2)。403 `license_inference_denied` は既存互換で維持し、429 `license_rate_limited` と 503 `license_temporarily_unavailable` を追加。永続的な理由はメッセージ先頭の理由コードで識別
+- **Rationale**: 既存クライアント・UI の互換を保ちつつ、再試行判断に必要な区別を HTTP レベルで提供
+- **Trade-offs**: 永続的な理由の機械判定はメッセージ解析が必要（必要になれば `error` に `reason` フィールドを追加する）
+
+### Decision: 利用記録の自動リトライはしない
+- **Rationale**: 応答を受け取れなかった場合にサーバー側で記録済みの可能性があり、再送は二重計上になりうる。要求過多・一時障害は呼出側の再試行に委ねる
+
+### Decision: キー形式をクライアントで検証しない
+- **Rationale**: 形式はサーバーの `invalid_request` で判定される。クライアントで複製すると形式変更時に追従が必要になる。未設定・空白のみだけを設定読込時に拒否する
+
 ## References
 - [reqwest crates.io](https://crates.io/crates/reqwest) — バージョン / MSRV
 - [rust-ini crates.io](https://crates.io/crates/rust-ini) — INI パーサ
