@@ -10,11 +10,13 @@ use crate::http::state::{AppState, SharedModel};
 use crate::perf::AnalyzePerf;
 use crate::phase2::{ExecutionProviderKind, InferenceOptions};
 use crate::preprocess::parse_ecl_filename;
-use axum::extract::{DefaultBodyLimit, Multipart, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -29,6 +31,12 @@ enum OutputFormat {
     Json,
 }
 
+/// Query string of `POST /v1/analyze`; unknown parameters are ignored.
+#[derive(Debug, Default, Deserialize)]
+pub struct AnalyzeQuery {
+    format: Option<String>,
+}
+
 struct AnalyzeRequestParts {
     ecl_dir: TempDir,
     ecl_path: PathBuf,
@@ -39,14 +47,27 @@ struct AnalyzeRequestParts {
 
 impl AnalyzeHandler {
     /// Axum handler: multipart ECL → spawn_blocking → `analyze_ecl_with_source`.
+    ///
+    /// Output format precedence: multipart `format` field > `?format=` query >
+    /// `Accept` header > CSV.
     pub async fn post(
         State(state): State<AppState>,
+        query: Result<Query<AnalyzeQuery>, QueryRejection>,
         headers: HeaderMap,
         multipart: Multipart,
     ) -> Result<Response, HttpError> {
         reject_oversized_content_length(&headers, state.max_body_bytes())?;
 
-        let parts = parse_multipart(multipart, &headers, state.max_body_bytes()).await?;
+        let Query(query) =
+            query.map_err(|e| HttpError::invalid_input(format!("invalid query string: {e}")))?;
+        let format_query = query
+            .format
+            .as_deref()
+            .map(|raw| parse_output_format(raw, "format query"))
+            .transpose()?;
+
+        let parts =
+            parse_multipart(multipart, format_query, &headers, state.max_body_bytes()).await?;
         // Validate ECL filename contract before calling the canonical entry (no meter).
         parse_ecl_filename(&parts.ecl_path).map_err(|e| HttpError::from(AnalyzeError::from(e)))?;
 
@@ -202,6 +223,7 @@ fn reject_oversized_content_length(
 
 async fn parse_multipart(
     mut multipart: Multipart,
+    format_query: Option<OutputFormat>,
     headers: &HeaderMap,
     max_body_bytes: usize,
 ) -> Result<AnalyzeRequestParts, HttpError> {
@@ -258,7 +280,11 @@ async fn parse_multipart(
     let (filename, data) = ecl_bytes
         .ok_or_else(|| HttpError::invalid_input("missing required multipart field 'ecl'"))?;
 
-    let format = resolve_output_format(format_field.as_deref(), headers.get(header::ACCEPT))?;
+    let format = resolve_output_format(
+        format_field.as_deref(),
+        format_query,
+        headers.get(header::ACCEPT),
+    )?;
     let provider = match provider_field.as_deref() {
         Some(raw) => Some(
             ExecutionProviderKind::from_str(raw.trim())
@@ -305,18 +331,26 @@ async fn field_text(field: axum::extract::multipart::Field<'_>) -> Result<String
         .map_err(|_| HttpError::invalid_input("field must be utf-8 text"))
 }
 
+fn parse_output_format(raw: &str, source: &str) -> Result<OutputFormat, HttpError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "csv" => Ok(OutputFormat::Csv),
+        "json" => Ok(OutputFormat::Json),
+        other => Err(HttpError::invalid_input(format!(
+            "invalid {source} '{other}' (expected csv|json)"
+        ))),
+    }
+}
+
 fn resolve_output_format(
     format_field: Option<&str>,
+    format_query: Option<OutputFormat>,
     accept: Option<&HeaderValue>,
 ) -> Result<OutputFormat, HttpError> {
     if let Some(raw) = format_field {
-        return match raw.trim().to_ascii_lowercase().as_str() {
-            "csv" => Ok(OutputFormat::Csv),
-            "json" => Ok(OutputFormat::Json),
-            other => Err(HttpError::invalid_input(format!(
-                "invalid format '{other}' (expected csv|json)"
-            ))),
-        };
+        return parse_output_format(raw, "format");
+    }
+    if let Some(format) = format_query {
+        return Ok(format);
     }
     if let Some(accept) = accept.and_then(|v| v.to_str().ok()) {
         // Prefer JSON when explicitly accepted; otherwise default CSV.
@@ -795,6 +829,153 @@ pub(crate) mod tests {
                     1,
                     "multiple windows in one request meter once"
                 );
+            });
+        });
+    }
+
+    fn content_type_of(headers: &HeaderMap) -> String {
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// One synthetic analyze (2 windows) against the tiny model; returns status, body, Content-Type and meter calls.
+    fn analyze_synthetic(
+        uri: &str,
+        format_field: Option<&[u8]>,
+        extra_headers: &[(&str, &str)],
+    ) -> (StatusCode, Vec<u8>, String, usize) {
+        let (ecl_name, ecl_bytes) = synthetic_ecl_upload();
+        with_gate(MockOutcome::Success { message: None }, |meter_calls| {
+            block_on(async {
+                let mut parts: Vec<(&str, Option<&str>, &[u8])> = vec![
+                    ("ecl", Some(ecl_name.as_str()), &ecl_bytes),
+                    ("max_windows", None, b"2"),
+                ];
+                if let Some(format) = format_field {
+                    parts.push(("format", None, format));
+                }
+                let req = multipart_request(uri, &parts, extra_headers);
+                let (status, bytes, headers) = oneshot(app_with_state(tiny_state()), req).await;
+                (
+                    status,
+                    bytes,
+                    content_type_of(&headers),
+                    meter_calls.load(Ordering::SeqCst),
+                )
+            })
+        })
+    }
+
+    #[test]
+    fn format_query_json_returns_json() {
+        let (status, bytes, ct, meters) =
+            analyze_synthetic("/v1/analyze?format=JSON&unrelated=1", None, &[]);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(ct.contains("application/json"), "got {ct}");
+        let v: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(v["summary"]["windows"], 2);
+        assert_eq!(meters, 1);
+    }
+
+    #[test]
+    fn format_query_csv_overrides_accept_json() {
+        let (status, bytes, ct, _) = analyze_synthetic(
+            "/v1/analyze?format=csv",
+            None,
+            &[(header::ACCEPT.as_str(), "application/json")],
+        );
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(ct.contains("text/csv"), "query must beat Accept; got {ct}");
+        let csv = String::from_utf8(bytes).expect("utf8");
+        assert!(csv.starts_with("record_id,"), "CSV result: {csv}");
+    }
+
+    #[test]
+    fn format_field_overrides_format_query() {
+        let (status, bytes, ct, _) = analyze_synthetic(
+            "/v1/analyze?format=csv",
+            Some(b"json"),
+            &[(header::ACCEPT.as_str(), "text/csv")],
+        );
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(
+            ct.contains("application/json"),
+            "field must beat query; got {ct}"
+        );
+        let v: Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(v["rows"].is_array());
+    }
+
+    #[test]
+    fn invalid_format_query_returns_400_without_metering() {
+        let (status, bytes, _, meters) = analyze_synthetic("/v1/analyze?format=xml", None, &[]);
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let v: Value = serde_json::from_slice(&bytes).expect("json error");
+        assert_eq!(v["error"]["code"], "invalid_input");
+        let message = v["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("xml") && message.contains("csv|json"),
+            "message: {message}"
+        );
+        assert_eq!(meters, 0, "invalid query must not reach analyze / meter");
+    }
+
+    #[test]
+    fn invalid_format_query_is_rejected_even_with_valid_format_field() {
+        let (status, bytes, _, meters) =
+            analyze_synthetic("/v1/analyze?format=xml", Some(b"json"), &[]);
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let v: Value = serde_json::from_slice(&bytes).expect("json error");
+        assert_eq!(v["error"]["code"], "invalid_input");
+        assert_eq!(meters, 0, "invalid query must not reach analyze / meter");
+    }
+
+    #[test]
+    fn malformed_query_returns_json_invalid_input_without_metering() {
+        with_gate(MockOutcome::Success { message: None }, |meter_calls| {
+            block_on(async {
+                let req = multipart_request(
+                    "/v1/analyze?format=json&format=csv",
+                    &[(
+                        "ecl",
+                        Some("1234567890_20240101_0000_2359.ecl"),
+                        b"placeholder",
+                    )],
+                    &[],
+                );
+                let (status, bytes, _) = oneshot(app_with_state(tiny_state()), req).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                let v: Value = serde_json::from_slice(&bytes).expect("json error envelope");
+                assert_eq!(v["error"]["code"], "invalid_input");
+                assert_eq!(meter_calls.load(Ordering::SeqCst), 0);
             });
         });
     }
