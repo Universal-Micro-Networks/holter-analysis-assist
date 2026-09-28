@@ -15,7 +15,10 @@ pub(crate) use config::verbatim_ini_option;
 pub use config::{LicenseConfig, SecretString};
 pub use gate::LicenseGate;
 pub use http::ReqwestLicenseClient;
-pub use types::{LicenseCheckResult, LicenseError, LicenseMeterResult};
+pub use types::{
+    LicenseCheckResult, LicenseError, LicenseFailure, LicenseFailureReason, LicenseMeterResult,
+    UsageSnapshot,
+};
 
 #[cfg(test)]
 pub(crate) use gate::GLOBAL_TEST_LOCK;

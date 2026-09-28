@@ -8,7 +8,7 @@
 use std::sync::Mutex;
 
 use super::client::LicenseClient;
-use super::types::LicenseError;
+use super::types::{LicenseError, LicenseFailure, LicenseFailureReason};
 
 /// Process-wide license gate wrapping a [`LicenseClient`].
 pub struct LicenseGate {
@@ -62,11 +62,12 @@ impl LicenseGate {
     pub fn ensure_startup_licensed(&self) -> Result<(), LicenseError> {
         let result = self.client.check_validity()?;
         if !result.allowed {
-            return Err(LicenseError::StartupFailed(
+            return Err(LicenseError::StartupFailed(LicenseFailure::new(
+                LicenseFailureReason::UnexpectedResponse,
                 result
                     .message
                     .unwrap_or_else(|| "validity check denied".into()),
-            ));
+            )));
         }
         Ok(())
     }
@@ -75,11 +76,12 @@ impl LicenseGate {
     pub fn ensure_inference_allowed(&self) -> Result<(), LicenseError> {
         let result = self.client.authorize_and_meter()?;
         if !result.allowed {
-            return Err(LicenseError::InferenceDenied(
+            return Err(LicenseError::InferenceDenied(LicenseFailure::new(
+                LicenseFailureReason::UnexpectedResponse,
                 result
                     .message
                     .unwrap_or_else(|| "authorize and meter denied".into()),
-            ));
+            )));
         }
         Ok(())
     }
@@ -100,7 +102,9 @@ impl LicenseGate {
 mod tests {
     use super::LicenseGate;
     use crate::license::client::{LicenseClient, MockLicenseClient, MockOutcome};
-    use crate::license::types::{LicenseCheckResult, LicenseError, LicenseMeterResult};
+    use crate::license::types::{
+        LicenseCheckResult, LicenseError, LicenseFailure, LicenseFailureReason, LicenseMeterResult,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -155,6 +159,7 @@ mod tests {
             Ok(LicenseCheckResult {
                 allowed: false,
                 message: Some("not allowed".into()),
+                ..Default::default()
             })
         }
 
@@ -162,6 +167,7 @@ mod tests {
             Ok(LicenseMeterResult {
                 allowed: false,
                 message: Some("not allowed".into()),
+                ..Default::default()
             })
         }
     }
@@ -190,7 +196,7 @@ mod tests {
             .ensure_startup_licensed()
             .expect_err("startup deny must not return Ok");
         assert!(
-            matches!(&err, LicenseError::StartupFailed(msg) if msg.contains("license expired")),
+            matches!(&err, LicenseError::StartupFailed(f) if f.message.contains("license expired")),
             "must be StartupFailed: {err:?}"
         );
         assert!(
@@ -269,7 +275,7 @@ mod tests {
             .ensure_inference_allowed()
             .expect_err("inference deny must not return Ok");
         assert!(
-            matches!(&err, LicenseError::InferenceDenied(msg) if msg.contains("quota exceeded")),
+            matches!(&err, LicenseError::InferenceDenied(f) if f.message.contains("quota exceeded")),
             "must be InferenceDenied: {err:?}"
         );
         assert!(
@@ -335,9 +341,10 @@ mod tests {
             let denied = LicenseGate::try_global()
                 .map(|g| g.ensure_inference_allowed())
                 .unwrap_or_else(|| {
-                    Err(LicenseError::InferenceDenied(
-                        "license gate not installed".into(),
-                    ))
+                    Err(LicenseError::InferenceDenied(LicenseFailure::new(
+                        LicenseFailureReason::GateNotInstalled,
+                        "license gate not installed",
+                    )))
                 });
             assert!(
                 matches!(denied, Err(LicenseError::InferenceDenied(_))),

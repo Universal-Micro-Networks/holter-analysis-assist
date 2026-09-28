@@ -34,7 +34,7 @@ impl LicenseClient for CountingAllowClient {
     fn check_validity(&self) -> Result<LicenseCheckResult, LicenseError> {
         Ok(LicenseCheckResult {
             allowed: true,
-            message: None,
+            ..Default::default()
         })
     }
 
@@ -42,7 +42,7 @@ impl LicenseClient for CountingAllowClient {
         METER_CALLS.fetch_add(1, Ordering::SeqCst);
         Ok(LicenseMeterResult {
             allowed: true,
-            message: None,
+            ..Default::default()
         })
     }
 }

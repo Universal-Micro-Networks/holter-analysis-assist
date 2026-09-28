@@ -163,7 +163,10 @@ fn ensure_inference_licensed() -> Result<(), AnalyzeError> {
     // Fail-closed: uninstalled gate or meter deny rejects before any analyze output.
     match crate::license::LicenseGate::try_global() {
         None => Err(crate::license::LicenseError::InferenceDenied(
-            "license gate not installed".into(),
+            crate::license::LicenseFailure::new(
+                crate::license::LicenseFailureReason::GateNotInstalled,
+                "license gate not installed",
+            ),
         )
         .into()),
         Some(gate) => {

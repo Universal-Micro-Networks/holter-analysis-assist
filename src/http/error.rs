@@ -111,9 +111,11 @@ impl HttpError {
 impl From<LicenseError> for HttpError {
     fn from(err: LicenseError) -> Self {
         match err {
-            LicenseError::InferenceDenied(msg) => Self::license_inference_denied(msg),
-            LicenseError::StartupFailed(msg) => {
-                Self::internal(format!("license startup failed: {msg}"))
+            LicenseError::InferenceDenied(failure) => {
+                Self::license_inference_denied(failure.message)
+            }
+            LicenseError::StartupFailed(failure) => {
+                Self::internal(format!("license startup failed: {}", failure.message))
             }
             LicenseError::Config(msg) => Self::internal(format!("license config error: {msg}")),
         }
@@ -190,6 +192,7 @@ fn sanitize_public_message(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::license::{LicenseFailure, LicenseFailureReason};
     use crate::phase2::InferError;
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
@@ -235,8 +238,11 @@ mod tests {
 
     #[test]
     fn license_inference_denied_from_license_error() {
-        let err: HttpError =
-            LicenseError::InferenceDenied("meter rejected: quota exceeded".into()).into();
+        let err: HttpError = LicenseError::InferenceDenied(LicenseFailure::new(
+            LicenseFailureReason::MonthlyLimitReached,
+            "meter rejected: quota exceeded",
+        ))
+        .into();
         assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
         assert_eq!(err.error_code(), "license_inference_denied");
         assert!(err.message().contains("quota exceeded"));
@@ -252,10 +258,12 @@ mod tests {
 
     #[test]
     fn analyze_license_denied_maps_to_forbidden() {
-        let err: HttpError = AnalyzeError::License(LicenseError::InferenceDenied(
-            "license gate not installed".into(),
-        ))
-        .into();
+        let err: HttpError =
+            AnalyzeError::License(LicenseError::InferenceDenied(LicenseFailure::new(
+                LicenseFailureReason::GateNotInstalled,
+                "license gate not installed",
+            )))
+            .into();
         assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
         assert_eq!(err.error_code(), "license_inference_denied");
     }

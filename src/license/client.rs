@@ -5,7 +5,9 @@
 //! reaching an external server. Transport failures map by operation:
 //! check → [`LicenseError::StartupFailed`], meter → [`LicenseError::InferenceDenied`].
 
-use super::types::{LicenseCheckResult, LicenseError, LicenseMeterResult};
+use super::types::{
+    LicenseCheckResult, LicenseError, LicenseFailure, LicenseFailureReason, LicenseMeterResult,
+};
 
 /// Port for license-server operations (validity check and authorize+meter).
 pub trait LicenseClient: Send + Sync {
@@ -18,9 +20,9 @@ pub trait LicenseClient: Send + Sync {
 pub enum MockOutcome {
     /// Server allows the operation.
     Success { message: Option<String> },
-    /// Server responds with an explicit deny (`allowed: false`).
+    /// Server responds with an explicit deny (reported as `license_invalid`).
     Deny { message: Option<String> },
-    /// Transport / timeout / communication failure (no successful response).
+    /// Transport / timeout / communication failure (reported as `temporary_failure`).
     TransportFail { message: String },
 }
 
@@ -44,15 +46,17 @@ impl LicenseClient for MockLicenseClient {
             MockOutcome::Success { message } => Ok(LicenseCheckResult {
                 allowed: true,
                 message: message.clone(),
+                ..Default::default()
             }),
-            MockOutcome::Deny { message } => Err(LicenseError::StartupFailed(
+            MockOutcome::Deny { message } => Err(LicenseError::StartupFailed(LicenseFailure::new(
+                LicenseFailureReason::LicenseInvalid,
                 message
                     .clone()
                     .unwrap_or_else(|| "validity check denied".into()),
+            ))),
+            MockOutcome::TransportFail { message } => Err(LicenseError::StartupFailed(
+                LicenseFailure::new(LicenseFailureReason::TemporaryFailure, message.clone()),
             )),
-            MockOutcome::TransportFail { message } => {
-                Err(LicenseError::StartupFailed(message.clone()))
-            }
         }
     }
 
@@ -61,15 +65,19 @@ impl LicenseClient for MockLicenseClient {
             MockOutcome::Success { message } => Ok(LicenseMeterResult {
                 allowed: true,
                 message: message.clone(),
+                ..Default::default()
             }),
-            MockOutcome::Deny { message } => Err(LicenseError::InferenceDenied(
-                message
-                    .clone()
-                    .unwrap_or_else(|| "authorize and meter denied".into()),
-            )),
-            MockOutcome::TransportFail { message } => {
-                Err(LicenseError::InferenceDenied(message.clone()))
+            MockOutcome::Deny { message } => {
+                Err(LicenseError::InferenceDenied(LicenseFailure::new(
+                    LicenseFailureReason::LicenseInvalid,
+                    message
+                        .clone()
+                        .unwrap_or_else(|| "authorize and meter denied".into()),
+                )))
             }
+            MockOutcome::TransportFail { message } => Err(LicenseError::InferenceDenied(
+                LicenseFailure::new(LicenseFailureReason::TemporaryFailure, message.clone()),
+            )),
         }
     }
 }
@@ -118,7 +126,7 @@ mod tests {
 
         let err = client.check_validity().expect_err("deny must be Err");
         assert!(
-            matches!(&err, LicenseError::StartupFailed(msg) if msg.contains("license expired")),
+            matches!(&err, LicenseError::StartupFailed(f) if f.message.contains("license expired")),
             "check deny must be StartupFailed: {err:?}"
         );
     }
@@ -134,7 +142,7 @@ mod tests {
 
         let err = client.authorize_and_meter().expect_err("deny must be Err");
         assert!(
-            matches!(&err, LicenseError::InferenceDenied(msg) if msg.contains("quota exceeded")),
+            matches!(&err, LicenseError::InferenceDenied(f) if f.message.contains("quota exceeded")),
             "meter deny must be InferenceDenied: {err:?}"
         );
     }
@@ -152,7 +160,7 @@ mod tests {
             .check_validity()
             .expect_err("transport fail must be Err");
         assert!(
-            matches!(&err, LicenseError::StartupFailed(msg) if msg.contains("connection timed out")),
+            matches!(&err, LicenseError::StartupFailed(f) if f.message.contains("connection timed out")),
             "check transport must be StartupFailed: {err:?}"
         );
         assert!(
@@ -174,7 +182,7 @@ mod tests {
             .authorize_and_meter()
             .expect_err("transport fail must be Err");
         assert!(
-            matches!(&err, LicenseError::InferenceDenied(msg) if msg.contains("dns failure")),
+            matches!(&err, LicenseError::InferenceDenied(f) if f.message.contains("dns failure")),
             "meter transport must be InferenceDenied: {err:?}"
         );
         assert!(

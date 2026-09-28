@@ -12,7 +12,9 @@
 
 use super::client::LicenseClient;
 use super::config::LicenseConfig;
-use super::types::{LicenseCheckResult, LicenseError, LicenseMeterResult};
+use super::types::{
+    LicenseCheckResult, LicenseError, LicenseFailure, LicenseFailureReason, LicenseMeterResult,
+};
 use serde::Serialize;
 use std::fmt;
 
@@ -107,12 +109,18 @@ fn parse_allowed_response(text: &str) -> Result<(bool, Option<String>), String> 
 
 impl LicenseClient for ReqwestLicenseClient {
     fn check_validity(&self) -> Result<LicenseCheckResult, LicenseError> {
-        let fail = |msg: String| LicenseError::StartupFailed(msg);
+        let fail = |msg: String| {
+            LicenseError::StartupFailed(LicenseFailure::new(
+                LicenseFailureReason::LicenseInvalid,
+                msg,
+            ))
+        };
         let provisional_allow = |reason: String| {
             eprintln!("license: provisional allow (check): {reason}");
             Ok(LicenseCheckResult {
                 allowed: true,
                 message: Some(format!("provisional allow: {reason}")),
+                ..Default::default()
             })
         };
 
@@ -140,16 +148,23 @@ impl LicenseClient for ReqwestLicenseClient {
         Ok(LicenseCheckResult {
             allowed: true,
             message,
+            ..Default::default()
         })
     }
 
     fn authorize_and_meter(&self) -> Result<LicenseMeterResult, LicenseError> {
-        let fail = |msg: String| LicenseError::InferenceDenied(msg);
+        let fail = |msg: String| {
+            LicenseError::InferenceDenied(LicenseFailure::new(
+                LicenseFailureReason::MonthlyLimitReached,
+                msg,
+            ))
+        };
         let provisional_allow = |reason: String| {
             eprintln!("license: provisional allow (meter): {reason}");
             Ok(LicenseMeterResult {
                 allowed: true,
                 message: Some(format!("provisional allow: {reason}")),
+                ..Default::default()
             })
         };
 
@@ -187,6 +202,7 @@ impl LicenseClient for ReqwestLicenseClient {
         Ok(LicenseMeterResult {
             allowed: true,
             message,
+            ..Default::default()
         })
     }
 }
@@ -443,7 +459,7 @@ mod tests {
 
         let err = client.check_validity().expect_err("deny");
         assert!(
-            matches!(&err, LicenseError::StartupFailed(msg) if msg.contains("license expired")),
+            matches!(&err, LicenseError::StartupFailed(f) if f.message.contains("license expired")),
             "{err:?}"
         );
         let _ = handle.join();
@@ -467,7 +483,7 @@ mod tests {
 
         let err = client.authorize_and_meter().expect_err("deny");
         assert!(
-            matches!(&err, LicenseError::InferenceDenied(msg) if msg.contains("quota exceeded")),
+            matches!(&err, LicenseError::InferenceDenied(f) if f.message.contains("quota exceeded")),
             "{err:?}"
         );
         let _ = handle.join();
