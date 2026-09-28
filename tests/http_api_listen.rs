@@ -397,29 +397,76 @@ fn startup_logs_model_ready_with_configured_batch_before_listening() {
     assert!(ready < listening, "ready must precede listen: {stderr}");
 }
 
+/// Ini whose limits accept [`synthetic_multi_window_ecl`] uploads.
+fn write_synthetic_ecl_ini(dir: &TempDir, bind: &str, server_url: &str) -> PathBuf {
+    write_merged_ini_opts(
+        dir,
+        bind,
+        server_url,
+        IniOpts {
+            max_body_bytes: 64 * 1024 * 1024,
+            request_timeout_secs: 300,
+            ..IniOpts::default()
+        },
+    )
+}
+
 #[test]
 fn analyze_request_meters_once_via_canonical_entry() {
+    let mock = LicenseMockServer::start();
+    let (ecl_name, ecl_bytes) = synthetic_multi_window_ecl();
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let ini = write_synthetic_ecl_ini(&dir, &bind, mock.base_url());
+
+    let _child = spawn_ready(&ini, &bind);
+
+    let before = mock.usage_hits();
+    let req = multipart_analyze_request_with_fields(
+        ecl_name,
+        &ecl_bytes,
+        &[("max_windows", "2"), ("format", "json")],
+    );
+    let (status, body) =
+        http_exchange_timeout(&bind, &req, Duration::from_secs(180)).expect("analyze exchange");
+
+    assert_eq!(
+        status,
+        200,
+        "analyze success expected; body={}",
+        String::from_utf8_lossy(&body[..body.len().min(500)])
+    );
+    assert_eq!(
+        mock.usage_hits().saturating_sub(before),
+        1,
+        "exactly one meter call per analyze request (no HTTP-layer double meter)"
+    );
+}
+
+#[test]
+fn analyze_short_ecl_returns_400_without_meter() {
     let mock = LicenseMockServer::start();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
     let ini = write_merged_ini(&dir, &bind, mock.base_url());
-
     let _child = spawn_ready(&ini, &bind);
 
     let before = mock.usage_hits();
     let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", b"placeholder");
     let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
 
-    // Placeholder ECL fails after license meter inside canonical entry.
-    assert!(
-        status == 500 || status == 400 || status == 403,
-        "expected post-meter failure status, got {status}; body={}",
+    assert_eq!(
+        status,
+        400,
+        "unreadable ECL content must be client error: body={}",
         String::from_utf8_lossy(&body)
     );
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+    assert_eq!(v["error"]["code"], "invalid_input");
     assert_eq!(
         mock.usage_hits().saturating_sub(before),
-        1,
-        "exactly one meter call per analyze request (no HTTP-layer double meter)"
+        0,
+        "ECL that cannot reach inference must not consume usage"
     );
 }
 
@@ -456,14 +503,16 @@ fn analyze_meter_deny_returns_403_without_result_leak() {
         MockResponse::unlimited(),
         MockResponse::error("monthly_limit_reached"),
     );
+    let (ecl_name, ecl_bytes) = synthetic_multi_window_ecl();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
-    let ini = write_merged_ini(&dir, &bind, mock.base_url());
+    let ini = write_synthetic_ecl_ini(&dir, &bind, mock.base_url());
     let _child = spawn_ready(&ini, &bind);
 
     let before = mock.usage_hits();
-    let req = multipart_analyze_request("1234567890_20240101_0000_2359.ecl", b"placeholder");
-    let (status, body) = http_exchange(&bind, &req).expect("analyze exchange");
+    let req = multipart_analyze_request_with_fields(ecl_name, &ecl_bytes, &[("max_windows", "2")]);
+    let (status, body) =
+        http_exchange_timeout(&bind, &req, Duration::from_secs(60)).expect("analyze exchange");
 
     assert_eq!(
         status,
@@ -626,9 +675,10 @@ fn assert_no_license_key(head: &str, body: &[u8]) {
 #[test]
 fn analyze_usage_denials_map_to_retryability_status_with_reason_prefix() {
     let mock = LicenseMockServer::start();
+    let (ecl_name, ecl_bytes) = synthetic_multi_window_ecl();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
-    let ini = write_merged_ini(&dir, &bind, mock.base_url());
+    let ini = write_synthetic_ecl_ini(&dir, &bind, mock.base_url());
     let _child = spawn_ready(&ini, &bind);
 
     for (usage_code, status, error_code) in [
@@ -639,12 +689,12 @@ fn analyze_usage_denials_map_to_retryability_status_with_reason_prefix() {
         mock.set_usage(MockResponse::error(usage_code));
         let before = mock.usage_hits();
         let req = multipart_analyze_request_with_fields(
-            "1234567890_20240101_0000_2359.ecl",
-            b"placeholder",
-            &[("format", "json")],
+            ecl_name,
+            &ecl_bytes,
+            &[("format", "json"), ("max_windows", "2")],
         );
-        let (got, head, body) =
-            http_exchange_with_head(&bind, &req, Duration::from_secs(5)).expect("analyze exchange");
+        let (got, head, body) = http_exchange_with_head(&bind, &req, Duration::from_secs(60))
+            .expect("analyze exchange");
 
         assert_eq!(
             got,
@@ -681,16 +731,7 @@ fn analyze_unlimited_license_succeeds_and_meters_once_for_multi_window_job() {
     let (ecl_name, ecl_bytes) = synthetic_multi_window_ecl();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
-    let ini = write_merged_ini_opts(
-        &dir,
-        &bind,
-        mock.base_url(),
-        IniOpts {
-            max_body_bytes: 64 * 1024 * 1024,
-            request_timeout_secs: 300,
-            ..IniOpts::default()
-        },
-    );
+    let ini = write_synthetic_ecl_ini(&dir, &bind, mock.base_url());
     let _child = spawn_ready(&ini, &bind);
 
     let before = mock.usage_hits();

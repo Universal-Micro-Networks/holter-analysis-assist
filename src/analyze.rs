@@ -98,7 +98,8 @@ pub fn analyze_ecl_with_limit(
 /// Canonical ECL analysis entry: load the model via [`ModelSource`] with `options`
 /// (provider, batch size, CUDA tuning), then run the pipeline.
 ///
-/// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
+/// License authorize+meter runs once per job via the process-wide [`crate::license::LicenseGate`],
+/// after model load and preprocess and before the first window inference.
 pub fn analyze_ecl_with_source(
     ecl_path: &Path,
     model: &ModelSource,
@@ -107,7 +108,6 @@ pub fn analyze_ecl_with_source(
     options: &InferenceOptions,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
     let job_start = Instant::now();
-    ensure_inference_licensed()?;
     // Fail-fast on model source before reading the full ECL (Path missing / Embedded unavailable).
     let load_start = Instant::now();
     let mut model = Phase2Model::load_from_source_with(model, options)?;
@@ -126,7 +126,8 @@ pub fn analyze_ecl_with_source(
 /// Run the ECL pipeline with an already-loaded [`Phase2Model`] (HTTP resident session).
 /// Batch size and tuning follow the model's effective settings.
 ///
-/// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
+/// License authorize+meter runs once per job via the process-wide [`crate::license::LicenseGate`],
+/// after preprocess and before the first window inference.
 pub fn analyze_ecl_with_model(
     ecl_path: &Path,
     model: &mut Phase2Model,
@@ -138,7 +139,8 @@ pub fn analyze_ecl_with_model(
 
 /// [`analyze_ecl_with_model`] that also hands every window's outputs to `observer`.
 ///
-/// License authorize+meter runs once at the start via the process-wide [`crate::license::LicenseGate`].
+/// License authorize+meter runs once per job via the process-wide [`crate::license::LicenseGate`],
+/// after preprocess and before the first window inference.
 pub(crate) fn analyze_ecl_with_model_observed(
     ecl_path: &Path,
     model: &mut Phase2Model,
@@ -147,7 +149,6 @@ pub(crate) fn analyze_ecl_with_model_observed(
     observer: WindowObserver<'_>,
 ) -> Result<(Vec<BeatResultRow>, AnalyzeSummary), AnalyzeError> {
     let job_start = Instant::now();
-    ensure_inference_licensed()?;
     analyze_ecl_with_loaded_model(
         ecl_path,
         model,
@@ -267,6 +268,9 @@ fn analyze_ecl_with_loaded_model(
         signal.starts_abs_500.len(),
         crate::preprocess::STEP_SEC
     );
+
+    // Invalid input or model must fail before this point so it consumes no usage.
+    ensure_inference_licensed()?;
 
     eprintln!(
         "[2/6] ONNX inference: windows={} using_provider={} (model resident={})",
@@ -508,10 +512,19 @@ mod tests {
         }
     }
 
+    fn install_counting_gate() -> Arc<AtomicUsize> {
+        let meter_calls = Arc::new(AtomicUsize::new(0));
+        LicenseGate::install(LicenseGate::new(CountingMeterClient::allow(Arc::clone(
+            &meter_calls,
+        ))))
+        .expect("install counting gate");
+        meter_calls
+    }
+
     #[test]
     fn analyze_ecl_with_source_missing_path_errors_before_ecl_read() {
         with_clean_global(|| {
-            install_allow_gate();
+            let meter_calls = install_counting_gate();
             let (_dir, csv) = temp_csv();
             let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1.onnx");
             let source = ModelSource::Path(missing.clone());
@@ -533,13 +546,18 @@ mod tests {
                 other => panic!("expected Infer(ModelNotFound), got {other}"),
             }
             assert!(!csv.exists(), "must not write CSV when model load fails");
+            assert_eq!(
+                meter_calls.load(Ordering::SeqCst),
+                0,
+                "model load failure must not consume usage"
+            );
         });
     }
 
     #[test]
     fn analyze_ecl_with_limit_wrapper_delegates_path_source() {
         with_clean_global(|| {
-            install_allow_gate();
+            let meter_calls = install_counting_gate();
             let (_dir, csv) = temp_csv();
             let missing = PathBuf::from("/tmp/holter-assist-missing-model-3-1-wrap.onnx");
             let err = analyze_ecl_with_limit(
@@ -554,6 +572,7 @@ mod tests {
                 matches!(err, AnalyzeError::Infer(InferError::ModelNotFound(_))),
                 "wrapper should load via ModelSource::Path: {err}"
             );
+            assert_eq!(meter_calls.load(Ordering::SeqCst), 0);
         });
     }
 
@@ -651,14 +670,15 @@ mod tests {
     #[test]
     fn analyze_ecl_with_source_uninstalled_gate_fail_closed_no_output() {
         with_clean_global(|| {
-            let (_dir, csv) = temp_csv();
-            let missing = PathBuf::from("/tmp/holter-assist-missing-license-uninstalled.onnx");
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let csv = dir.path().join("out.csv");
             let err = analyze_ecl_with_source(
-                &stub_ecl_path(),
-                &ModelSource::Path(missing),
+                &ecl,
+                &ModelSource::Path(tiny_dynamic_fixture()),
                 &csv,
-                Some(0),
-                &InferenceOptions::from(ExecutionProviderKind::Cpu),
+                Some(2),
+                &cpu_options(4),
             )
             .expect_err("uninstalled gate must fail-closed");
             let msg = err.to_string();
@@ -694,14 +714,15 @@ mod tests {
             )))
             .expect("install deny gate");
 
-            let (_dir, csv) = temp_csv();
-            let missing = PathBuf::from("/tmp/holter-assist-missing-license-deny.onnx");
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let csv = dir.path().join("out.csv");
             let err = analyze_ecl_with_source(
-                &stub_ecl_path(),
-                &ModelSource::Path(missing),
+                &ecl,
+                &ModelSource::Path(tiny_dynamic_fixture()),
                 &csv,
                 Some(2),
-                &InferenceOptions::from(ExecutionProviderKind::Cpu),
+                &cpu_options(4),
             )
             .expect_err("meter deny must reject inference");
             let msg = err.to_string();
@@ -718,49 +739,46 @@ mod tests {
                 "expected License(InferenceDenied(monthly_limit_reached)), got {err:?}"
             );
             assert!(!csv.exists(), "must not write CSV on meter deny");
+
+            let mut model = load_tiny(4);
+            let mut calls = 0usize;
+            let err = analyze_ecl_with_model_observed(
+                &ecl,
+                &mut model,
+                &csv,
+                Some(2),
+                &mut |_wi: usize, _out: &WindowOutputs| calls += 1,
+            )
+            .expect_err("meter deny must reject resident-model inference");
+            assert!(
+                matches!(
+                    &err,
+                    AnalyzeError::License(LicenseError::InferenceDenied(f))
+                        if f.reason == LicenseFailureReason::MonthlyLimitReached
+                ),
+                "got {err:?}"
+            );
+            assert_eq!(calls, 0, "no window may be inferred after meter deny");
+            assert!(!csv.exists(), "must not write CSV on meter deny");
         });
     }
 
     #[test]
     fn analyze_ecl_with_source_meters_once_even_with_multiple_windows() {
         with_clean_global(|| {
-            let meter_calls = Arc::new(AtomicUsize::new(0));
-            LicenseGate::install(LicenseGate::new(CountingMeterClient::allow(Arc::clone(
-                &meter_calls,
-            ))))
-            .expect("install counting gate");
-
-            let sample_link = Path::new("resources/samples/sample.ecl");
-            let onnx = Path::new("resources/models/phase2_rev1.onnx");
-            if !sample_link.exists() || !onnx.exists() {
-                // Still prove the entry meters once before model load (no window loop).
-                let (_dir, csv) = temp_csv();
-                let missing = PathBuf::from("/tmp/holter-assist-missing-license-multi-win.onnx");
-                let _ = analyze_ecl_with_source(
-                    &stub_ecl_path(),
-                    &ModelSource::Path(missing),
-                    &csv,
-                    Some(3),
-                    &InferenceOptions::from(ExecutionProviderKind::Cpu),
-                );
-                assert_eq!(
-                    meter_calls.load(Ordering::SeqCst),
-                    1,
-                    "canonical entry must meter once before model/window work"
-                );
-                return;
-            }
-            let sample = sample_link.canonicalize().expect("canonicalize sample.ecl");
-            let (_dir, csv) = temp_csv();
+            let meter_calls = install_counting_gate();
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let csv = dir.path().join("out.csv");
             let (rows, summary) = analyze_ecl_with_source(
-                &sample,
-                &ModelSource::Path(onnx.to_path_buf()),
+                &ecl,
+                &ModelSource::Path(tiny_dynamic_fixture()),
                 &csv,
-                Some(2),
-                &InferenceOptions::from(ExecutionProviderKind::Cpu),
+                Some(3),
+                &cpu_options(1),
             )
             .expect("meter success should allow analyze");
-            assert_eq!(summary.windows, 2, "exercise multiple windows");
+            assert_eq!(summary.windows, 3, "exercise multiple windows");
             assert!(csv.exists());
             assert!(!rows.is_empty() || summary.beats == 0);
             assert_eq!(
@@ -774,26 +792,20 @@ mod tests {
     #[test]
     fn analyze_ecl_wrappers_do_not_double_meter() {
         with_clean_global(|| {
-            let meter_calls = Arc::new(AtomicUsize::new(0));
-            LicenseGate::install(LicenseGate::new(CountingMeterClient::allow(Arc::clone(
-                &meter_calls,
-            ))))
-            .expect("install counting gate");
+            let meter_calls = install_counting_gate();
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
 
-            let (_dir, csv) = temp_csv();
-            let missing = PathBuf::from("/tmp/holter-assist-missing-license-wrapper.onnx");
-            let err = analyze_ecl_with_limit(
-                &stub_ecl_path(),
-                &missing,
+            let csv = dir.path().join("limit.csv");
+            let (_rows, summary) = analyze_ecl_with_limit(
+                &ecl,
+                &tiny_dynamic_fixture(),
                 &csv,
                 Some(2),
                 ExecutionProviderKind::Cpu,
             )
-            .expect_err("missing model after meter");
-            assert!(
-                matches!(err, AnalyzeError::Infer(InferError::ModelNotFound(_))),
-                "wrapper should reach model load after single meter: {err}"
-            );
+            .expect("wrapper analyze");
+            assert_eq!(summary.windows, 2);
             assert_eq!(
                 meter_calls.load(Ordering::SeqCst),
                 1,
@@ -801,12 +813,8 @@ mod tests {
             );
 
             // Second call via analyze_ecl must also meter exactly once more (fresh job).
-            let (_dir2, csv2) = temp_csv();
-            let _ = analyze_ecl(
-                &stub_ecl_path(),
-                &PathBuf::from("/tmp/holter-assist-missing-license-wrapper2.onnx"),
-                &csv2,
-            );
+            let csv2 = dir.path().join("full.csv");
+            analyze_ecl(&ecl, &tiny_dynamic_fixture(), &csv2).expect("wrapper analyze");
             assert_eq!(
                 meter_calls.load(Ordering::SeqCst),
                 2,
@@ -1106,11 +1114,13 @@ mod tests {
     #[test]
     fn observed_entry_uninstalled_gate_fail_closed_without_windows_or_output() {
         with_clean_global(|| {
-            let (_dir, csv) = temp_csv();
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let csv = dir.path().join("out.csv");
             let mut model = load_tiny(4);
             let mut calls = 0usize;
             let err = analyze_ecl_with_model_observed(
-                &stub_ecl_path(),
+                &ecl,
                 &mut model,
                 &csv,
                 Some(3),
@@ -1126,6 +1136,91 @@ mod tests {
                 "expected License(InferenceDenied(gate_not_installed)), got {err:?}"
             );
             assert_eq!(calls, 0, "no window may be observed without license");
+            assert!(!csv.exists());
+        });
+    }
+
+    // --- Metering after preprocess, before the first window inference (task 10.1) ---
+
+    #[test]
+    fn invalid_ecl_filename_is_not_metered() {
+        with_clean_global(|| {
+            let meter_calls = install_counting_gate();
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let renamed = dir.path().join("not_an_ecl_name.ecl");
+            std::fs::rename(&ecl, &renamed).expect("rename synthetic ECL");
+            let csv = dir.path().join("out.csv");
+
+            let err = analyze_ecl_with_source(
+                &renamed,
+                &ModelSource::Path(tiny_dynamic_fixture()),
+                &csv,
+                Some(2),
+                &cpu_options(4),
+            )
+            .expect_err("invalid filename must fail");
+            assert!(matches!(err, AnalyzeError::Preprocess(_)), "got {err:?}");
+
+            let mut model = load_tiny(4);
+            let err = analyze_ecl_with_model(&renamed, &mut model, &csv, Some(2))
+                .expect_err("invalid filename must fail with resident model");
+            assert!(matches!(err, AnalyzeError::Preprocess(_)), "got {err:?}");
+
+            assert_eq!(meter_calls.load(Ordering::SeqCst), 0);
+            assert!(!csv.exists());
+        });
+    }
+
+    #[test]
+    fn unreadable_ecl_is_not_metered() {
+        with_clean_global(|| {
+            let meter_calls = install_counting_gate();
+            let dir = TempDir::new().expect("tempdir");
+            let missing_ecl = dir.path().join(SYNTH_ECL_NAME);
+            let short_ecl = dir.path().join("1234567890_20250102_0000_0011.ecl");
+            std::fs::write(&short_ecl, b"placeholder").expect("write short ECL");
+            let csv = dir.path().join("out.csv");
+
+            for ecl in [&missing_ecl, &short_ecl] {
+                let err = analyze_ecl_with_source(
+                    ecl,
+                    &ModelSource::Path(tiny_dynamic_fixture()),
+                    &csv,
+                    Some(2),
+                    &cpu_options(4),
+                )
+                .expect_err("unreadable ECL must fail");
+                assert!(matches!(err, AnalyzeError::Preprocess(_)), "got {err:?}");
+            }
+
+            assert_eq!(meter_calls.load(Ordering::SeqCst), 0);
+            assert!(!csv.exists());
+        });
+    }
+
+    #[test]
+    fn missing_model_is_not_metered() {
+        with_clean_global(|| {
+            let meter_calls = install_counting_gate();
+            let dir = TempDir::new().expect("tempdir");
+            let ecl = write_synthetic_ecl(dir.path());
+            let csv = dir.path().join("out.csv");
+
+            let err = analyze_ecl_with_source(
+                &ecl,
+                &ModelSource::Path(dir.path().join("missing.onnx")),
+                &csv,
+                Some(2),
+                &cpu_options(4),
+            )
+            .expect_err("missing model must fail");
+            assert!(
+                matches!(err, AnalyzeError::Infer(InferError::ModelNotFound(_))),
+                "got {err:?}"
+            );
+
+            assert_eq!(meter_calls.load(Ordering::SeqCst), 0);
             assert!(!csv.exists());
         });
     }

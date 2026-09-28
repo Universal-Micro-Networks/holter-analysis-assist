@@ -349,7 +349,7 @@ fn safe_basename(filename: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::http::config::HttpConfig;
     use crate::http::response::ResponseCodec;
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(opts.cuda, startup.cuda);
     }
 
-    fn tiny_fixture() -> PathBuf {
+    pub(crate) fn tiny_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase2_tiny_dynamic.onnx")
     }
 
@@ -708,8 +708,30 @@ mod tests {
         });
     }
 
+    const SYNTH_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+    fn tiny_state() -> AppState {
+        AppState::new(
+            test_config(SYNTH_BODY_LIMIT, Some(tiny_fixture())),
+            ModelSource::Path(tiny_fixture()),
+        )
+    }
+
+    /// Filename and bytes of the synthetic 38-window ECL (about 43 MB).
+    pub(crate) fn synthetic_ecl_upload() -> (String, Vec<u8>) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_synthetic_ecl(dir.path());
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("ecl basename")
+            .to_string();
+        (name, std::fs::read(&path).expect("read synthetic ECL"))
+    }
+
     #[test]
     fn license_deny_returns_403_and_meters_once() {
+        let (ecl_name, ecl_bytes) = synthetic_ecl_upload();
         with_gate(
             MockOutcome::Reject {
                 reason: LicenseFailureReason::MonthlyLimitReached,
@@ -717,21 +739,13 @@ mod tests {
             },
             |meter_calls| {
                 block_on(async {
-                    let state = AppState::new(
-                        test_config(
-                            1024 * 1024,
-                            Some(PathBuf::from("/tmp/missing-http-3-1-deny.onnx")),
-                        ),
-                        ModelSource::Path(PathBuf::from("/tmp/missing-http-3-1-deny.onnx")),
-                    );
-                    let app = app_with_state(state);
+                    let app = app_with_state(tiny_state());
                     let req = multipart_request(
                         "/v1/analyze",
-                        &[(
-                            "ecl",
-                            Some("1234567890_20240101_0000_2359.ecl"),
-                            b"placeholder",
-                        )],
+                        &[
+                            ("ecl", Some(ecl_name.as_str()), &ecl_bytes),
+                            ("max_windows", None, b"2"),
+                        ],
                         &[],
                     );
                     let (status, bytes, _) = oneshot(app, req).await;
@@ -754,16 +768,43 @@ mod tests {
 
     #[test]
     fn analyze_meters_once_via_canonical_entry() {
+        let (ecl_name, ecl_bytes) = synthetic_ecl_upload();
         with_gate(MockOutcome::Success { message: None }, |meter_calls| {
             block_on(async {
-                let state = AppState::new(
-                    test_config(
-                        1024 * 1024,
-                        Some(PathBuf::from("/tmp/missing-http-3-1-once.onnx")),
-                    ),
-                    ModelSource::Path(PathBuf::from("/tmp/missing-http-3-1-once.onnx")),
+                let app = app_with_state(tiny_state());
+                let req = multipart_request(
+                    "/v1/analyze",
+                    &[
+                        ("ecl", Some(ecl_name.as_str()), &ecl_bytes),
+                        ("format", None, b"json"),
+                        ("max_windows", None, b"3"),
+                    ],
+                    &[],
                 );
-                let app = app_with_state(state);
+                let (status, bytes, _) = oneshot(app, req).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "body: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                let v: Value = serde_json::from_slice(&bytes).expect("json");
+                assert_eq!(v["summary"]["windows"], 3);
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    1,
+                    "multiple windows in one request meter once"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn short_ecl_or_missing_model_fails_without_metering() {
+        let (ecl_name, ecl_bytes) = synthetic_ecl_upload();
+        with_gate(MockOutcome::Success { message: None }, |meter_calls| {
+            block_on(async {
+                let app = app_with_state(tiny_state());
                 let req = multipart_request(
                     "/v1/analyze",
                     &[(
@@ -773,40 +814,57 @@ mod tests {
                     )],
                     &[],
                 );
-                let (status, _bytes, _) = oneshot(app, req).await;
-                assert!(
-                    status == StatusCode::INTERNAL_SERVER_ERROR
-                        || status == StatusCode::BAD_REQUEST,
-                    "missing model / placeholder ecl should fail after metering; got {status}"
+                let (status, bytes, _) = oneshot(app, req).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                let v: Value = serde_json::from_slice(&bytes).expect("json");
+                assert_eq!(v["error"]["code"], "invalid_input");
+
+                let missing = PathBuf::from("/tmp/missing-http-10-1.onnx");
+                let state = AppState::new(
+                    test_config(SYNTH_BODY_LIMIT, Some(missing.clone())),
+                    ModelSource::Path(missing),
                 );
-                assert_eq!(meter_calls.load(Ordering::SeqCst), 1);
+                let req = multipart_request(
+                    "/v1/analyze",
+                    &[
+                        ("ecl", Some(ecl_name.as_str()), &ecl_bytes),
+                        ("max_windows", None, b"2"),
+                    ],
+                    &[],
+                );
+                let (status, _, _) = oneshot(app_with_state(state), req).await;
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+                assert_eq!(
+                    meter_calls.load(Ordering::SeqCst),
+                    0,
+                    "input or model failures before inference must not consume usage"
+                );
             });
         });
     }
 
     #[test]
     fn format_json_field_still_returns_json_error_envelope_on_deny() {
+        let (ecl_name, ecl_bytes) = synthetic_ecl_upload();
         with_gate(
             MockOutcome::Reject {
                 reason: LicenseFailureReason::LicenseInvalid,
                 message: Some("deny".into()),
             },
-            |_meter_calls| {
+            |meter_calls| {
                 block_on(async {
-                    let state = AppState::new(
-                        test_config(1024 * 1024, Some(PathBuf::from("/tmp/x.onnx"))),
-                        ModelSource::Path(PathBuf::from("/tmp/x.onnx")),
-                    );
-                    let app = app_with_state(state);
+                    let app = app_with_state(tiny_state());
                     let req = multipart_request(
                         "/v1/analyze",
                         &[
-                            ("ecl", Some("1234567890_20240101_0000_2359.ecl"), b"x"),
+                            ("ecl", Some(ecl_name.as_str()), &ecl_bytes),
                             ("format", None, b"json"),
+                            ("max_windows", None, b"2"),
                         ],
                         &[],
                     );
-                    let (status, _, headers) = oneshot(app, req).await;
+                    let (status, bytes, headers) = oneshot(app, req).await;
                     assert_eq!(status, StatusCode::FORBIDDEN);
                     let ct = headers
                         .get(header::CONTENT_TYPE)
@@ -816,6 +874,10 @@ mod tests {
                         ct.contains("application/json"),
                         "error envelope is JSON: {ct}"
                     );
+                    let v: Value = serde_json::from_slice(&bytes).expect("json");
+                    assert_eq!(v["error"]["code"], "license_inference_denied");
+                    assert!(v.get("rows").is_none() && v.get("summary").is_none());
+                    assert_eq!(meter_calls.load(Ordering::SeqCst), 1);
                 });
             },
         );

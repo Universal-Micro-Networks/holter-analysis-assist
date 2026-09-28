@@ -46,6 +46,7 @@ async fn map_timeout_to_http_error(req: Request, next: Next) -> Response {
 mod tests {
     use super::*;
     use crate::http::config::HttpConfig;
+    use crate::http::handlers::analyze::tests::{synthetic_ecl_upload, tiny_fixture};
     use crate::inference_options::{BatchSize, CudaTuning};
     use crate::license::{
         LicenseCheckResult, LicenseClient, LicenseError, LicenseGate, LicenseMeterResult,
@@ -56,7 +57,6 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request as HttpRequest, StatusCode};
     use serde_json::Value;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -82,14 +82,14 @@ mod tests {
         AppState::new(
             HttpConfig {
                 bind: "127.0.0.1:0".into(),
-                max_body_bytes: 1024 * 1024,
-                request_timeout: Duration::from_secs(30),
-                model_path: Some(PathBuf::from("/tmp/routes-test-missing.onnx")),
+                max_body_bytes: 64 * 1024 * 1024,
+                request_timeout: Duration::from_secs(300),
+                model_path: Some(tiny_fixture()),
                 provider: ExecutionProviderKind::Cpu,
                 batch_size: BatchSize::default(),
                 cuda: CudaTuning::default(),
             },
-            ModelSource::Path(PathBuf::from("/tmp/routes-test-missing.onnx")),
+            ModelSource::Path(tiny_fixture()),
         )
     }
 
@@ -127,12 +127,22 @@ mod tests {
 
     async fn oneshot_analyze(app: axum::Router) -> axum::response::Response {
         let boundary = "----RoutesUnitBoundary";
-        let body = format!(
+        let (ecl_name, ecl_bytes) = synthetic_ecl_upload();
+        let mut body = format!(
             "--{boundary}\r\n\
-             Content-Disposition: form-data; name=\"ecl\"; filename=\"1234567890_20240101_0000_2359.ecl\"\r\n\
-             Content-Type: application/octet-stream\r\n\r\n\
-             x\r\n\
-             --{boundary}--\r\n"
+             Content-Disposition: form-data; name=\"ecl\"; filename=\"{ecl_name}\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&ecl_bytes);
+        body.extend_from_slice(
+            format!(
+                "\r\n--{boundary}\r\n\
+                 Content-Disposition: form-data; name=\"max_windows\"\r\n\r\n\
+                 2\r\n\
+                 --{boundary}--\r\n"
+            )
+            .as_bytes(),
         );
         app.oneshot(
             HttpRequest::builder()
@@ -159,16 +169,13 @@ mod tests {
                 assert_eq!(meter_calls.load(Ordering::SeqCst), 0);
 
                 let analyze = oneshot_analyze(app).await;
-                assert_ne!(analyze.status(), StatusCode::NOT_FOUND);
+                assert_eq!(analyze.status(), StatusCode::OK);
                 assert_eq!(meter_calls.load(Ordering::SeqCst), 1);
-                let bytes = to_bytes(analyze.into_body(), 1024 * 1024)
+                let bytes = to_bytes(analyze.into_body(), 64 * 1024 * 1024)
                     .await
                     .expect("body");
-                let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-                assert!(
-                    v.get("rows").is_none(),
-                    "failure path must not leak analyze rows"
-                );
+                let csv = String::from_utf8(bytes.to_vec()).expect("utf8 csv");
+                assert!(csv.starts_with("record_id,"), "CSV result: {csv}");
             });
         });
     }
