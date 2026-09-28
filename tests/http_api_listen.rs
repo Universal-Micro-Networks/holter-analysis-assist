@@ -3,6 +3,9 @@
 //! Covers: startup deny → no listen; startup ok → GET /health 200 (no meter);
 //! analyze success / invalid input / inference deny / oversized body; meter
 //! exactly once per analyze via the canonical entry (no HTTP-layer double meter).
+//! Revision (task 9.2): usage denial reasons map to 403 / 429 / 503 with a
+//! reason-code prefix and no result; an unlimited license (`remaining: null`)
+//! analyzes a multi-window job with a single usage call.
 //!
 //! Manual smoke with a real license server and `release-embedded-http-api`
 //! artifact is documented in `config/http.ini.example` (task 5.3; not CI-required).
@@ -12,7 +15,10 @@
 mod common;
 
 use assert_cmd::cargo::cargo_bin;
-use common::license_mock::{license_ini_section, LicenseMockServer, MockResponse};
+use common::license_mock::{
+    license_ini_section, LicenseMockServer, MockResponse, TEST_LICENSE_KEY,
+};
+use holter_analysis_assist::preprocess::EXPECTED_24H_SAMPLES_250;
 use predicates::prelude::*;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -95,6 +101,15 @@ fn http_exchange_timeout(
     request: &[u8],
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>), String> {
+    http_exchange_with_head(addr, request, timeout).map(|(status, _, body)| (status, body))
+}
+
+/// Like [`http_exchange_timeout`], also returning the raw response head (status line + headers).
+fn http_exchange_with_head(
+    addr: &str,
+    request: &[u8],
+    timeout: Duration,
+) -> Result<(u16, String, Vec<u8>), String> {
     let mut stream = TcpStream::connect(addr).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
@@ -108,14 +123,14 @@ fn http_exchange_timeout(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| format!("no status in response: {text}"))?;
-    let body = if let Some(idx) = text.find("\r\n\r\n") {
-        buf[idx + 4..].to_vec()
+    let (head, body) = if let Some(idx) = text.find("\r\n\r\n") {
+        (text[..idx].to_string(), buf[idx + 4..].to_vec())
     } else if let Some(idx) = text.find("\n\n") {
-        buf[idx + 2..].to_vec()
+        (text[..idx].to_string(), buf[idx + 2..].to_vec())
     } else {
-        Vec::new()
+        (text.to_string(), Vec::new())
     };
-    Ok((status, body))
+    Ok((status, head, body))
 }
 
 fn http_get(addr: &str, path: &str) -> Result<(u16, Vec<u8>), String> {
@@ -579,5 +594,135 @@ fn analyze_success_returns_csv_and_meters_once_when_sample_present() {
         mock.usage_hits().saturating_sub(before),
         1,
         "one successful analyze → one meter"
+    );
+}
+
+/// 24 h ECL (minimum accepted size) with QRS-like pulses at 250 Hz; the file
+/// name declares an 11-minute recording (38 windows).
+fn synthetic_multi_window_ecl() -> (&'static str, Vec<u8>) {
+    let n = EXPECTED_24H_SAMPLES_250;
+    let mut bytes = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let phase = (i % 199) as f32 - 99.0;
+        let value = 400.0 * (-(phase * phase) / 4.0).exp() + 20.0 * (i as f32 * 0.004).sin();
+        let raw12 = (0x0800 + value.round() as i32).clamp(0, 0x0FFF) as u16;
+        let word = ((raw12 & 0x0F00) << 4) | (raw12 & 0x00FF);
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    ("1234567890_20250101_0000_0011.ecl", bytes)
+}
+
+fn assert_no_license_key(head: &str, body: &[u8]) {
+    assert!(
+        !head.contains(TEST_LICENSE_KEY),
+        "response headers must not contain the license key: {head}"
+    );
+    assert!(
+        !String::from_utf8_lossy(body).contains(TEST_LICENSE_KEY),
+        "response body must not contain the license key"
+    );
+}
+
+#[test]
+fn analyze_usage_denials_map_to_retryability_status_with_reason_prefix() {
+    let mock = LicenseMockServer::start();
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let ini = write_merged_ini(&dir, &bind, mock.base_url());
+    let _child = spawn_ready(&ini, &bind);
+
+    for (usage_code, status, error_code) in [
+        ("monthly_limit_reached", 403, "license_inference_denied"),
+        ("rate_limited", 429, "license_rate_limited"),
+        ("temporary_failure", 503, "license_temporarily_unavailable"),
+    ] {
+        mock.set_usage(MockResponse::error(usage_code));
+        let before = mock.usage_hits();
+        let req = multipart_analyze_request_with_fields(
+            "1234567890_20240101_0000_2359.ecl",
+            b"placeholder",
+            &[("format", "json")],
+        );
+        let (got, head, body) =
+            http_exchange_with_head(&bind, &req, Duration::from_secs(5)).expect("analyze exchange");
+
+        assert_eq!(
+            got,
+            status,
+            "usage {usage_code} must map to HTTP {status}: body={}",
+            String::from_utf8_lossy(&body)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        let obj = v.as_object().expect("json object");
+        assert_eq!(
+            obj.keys().collect::<Vec<_>>(),
+            vec!["error"],
+            "usage {usage_code}: error envelope only, no analyze result: {v}"
+        );
+        assert_eq!(v["error"]["code"], error_code, "usage {usage_code}: {v}");
+        let message = v["error"]["message"].as_str().expect("error.message");
+        assert!(
+            message.starts_with(&format!("{usage_code}: ")),
+            "usage {usage_code}: message must start with the reason code: {message}"
+        );
+        assert_no_license_key(&head, &body);
+        assert_eq!(
+            mock.usage_hits().saturating_sub(before),
+            1,
+            "usage {usage_code}: denied request is metered exactly once"
+        );
+    }
+}
+
+#[test]
+fn analyze_unlimited_license_succeeds_and_meters_once_for_multi_window_job() {
+    let mock =
+        LicenseMockServer::with_responses(MockResponse::unlimited(), MockResponse::unlimited());
+    let (ecl_name, ecl_bytes) = synthetic_multi_window_ecl();
+    let bind = free_bind_addr();
+    let dir = TempDir::new().expect("tempdir");
+    let ini = write_merged_ini_opts(
+        &dir,
+        &bind,
+        mock.base_url(),
+        IniOpts {
+            max_body_bytes: 64 * 1024 * 1024,
+            request_timeout_secs: 300,
+            ..IniOpts::default()
+        },
+    );
+    let _child = spawn_ready(&ini, &bind);
+
+    let before = mock.usage_hits();
+    let req = multipart_analyze_request_with_fields(
+        ecl_name,
+        &ecl_bytes,
+        &[("provider", "cpu"), ("format", "json")],
+    );
+    let (status, head, body) =
+        http_exchange_with_head(&bind, &req, Duration::from_secs(180)).expect("analyze exchange");
+
+    assert_eq!(
+        status,
+        200,
+        "unlimited license (remaining: null) must not deny: body={}",
+        String::from_utf8_lossy(&body[..body.len().min(500)])
+    );
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("analyze json");
+    assert!(
+        v.get("error").is_none(),
+        "success must not carry an error: {v}"
+    );
+    assert!(v["rows"].is_array(), "analyze result rows expected");
+    let windows = v["summary"]["windows"].as_u64().expect("summary.windows");
+    assert!(
+        windows > 1,
+        "fixture must exercise multiple windows, got {windows}"
+    );
+    assert_no_license_key(&head, &body);
+    assert_eq!(
+        mock.usage_hits().saturating_sub(before),
+        1,
+        "one analyze request with {windows} windows → exactly one usage call"
     );
 }
