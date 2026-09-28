@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -101,7 +101,7 @@ fn packaging_ini_sample_includes_http_and_license_from_upstream() {
         assemble.display()
     );
 
-    let status = Command::new("bash")
+    let status = common::bash()
         .arg(&assemble)
         .current_dir(&root)
         .status()

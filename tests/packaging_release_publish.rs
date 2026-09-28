@@ -4,7 +4,7 @@
 //! (same pattern as tools/check_ci_embed_*.sh for embed release jobs).
 
 use std::path::PathBuf;
-use std::process::Command;
+mod common;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -19,7 +19,7 @@ fn check_ci_packaging_release_contract_passes() {
         script.display()
     );
 
-    let output = Command::new("bash")
+    let output = common::bash()
         .arg(&script)
         .current_dir(repo_root())
         .output()

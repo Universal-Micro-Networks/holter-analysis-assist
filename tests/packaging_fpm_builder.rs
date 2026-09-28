@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
 use tempfile::TempDir;
 
@@ -19,7 +19,7 @@ fn read_utf8(path: &Path) -> String {
 }
 
 fn run_bash(script: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("bash")
+    common::bash()
         .arg(script)
         .args(args)
         .current_dir(repo_root())
