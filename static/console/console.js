@@ -160,6 +160,25 @@
     return text;
   }
 
+  var LICENSE_ERROR_HINTS = {
+    license_temporarily_unavailable:
+      "ライセンスサーバーに接続できないため、解析を実行できませんでした。ネットワーク接続とライセンスサーバーの稼働状況を確認してから、もう一度実行してください。",
+    license_inference_denied:
+      "ライセンスにより解析が許可されませんでした。ライセンスの有効状態と月間の利用上限を確認してください。",
+    license_rate_limited:
+      "ライセンスサーバーへの問い合わせが集中しているため、解析を実行できませんでした。しばらく待ってから、もう一度実行してください。",
+  };
+
+  function licenseErrorHint(text) {
+    try {
+      var data = JSON.parse(text);
+      var code = data && data.error && data.error.code;
+      return (code && LICENSE_ERROR_HINTS[code]) || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
   function guessKind(contentType, body) {
     var ct = (contentType || "").toLowerCase();
     if (ct.indexOf("json") !== -1) {
@@ -282,6 +301,11 @@
         var base = "解析に失敗しました（HTTP " + res.status + "）。";
         if (res.status === 504) {
           base = "解析に失敗しました。リクエストがタイムアウトしました。";
+        }
+        var hint = licenseErrorHint(text);
+        if (hint) {
+          base = base + " " + hint;
+          detail = detail ? "詳細: " + detail : "";
         }
         showError(detail ? base + " " + detail : base);
         return;

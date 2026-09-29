@@ -101,7 +101,11 @@ impl AnalyzeHandler {
         drop(parts.ecl_dir);
         drop(out_dir);
 
-        let (rows, summary) = analyze_result.map_err(HttpError::from)?;
+        let (rows, summary) = analyze_result.map_err(|e| {
+            let err = HttpError::from(e);
+            eprintln!("{}", failure_log_line(&err));
+            err
+        })?;
 
         let encode_started = Instant::now();
         let (content_type, body) = match format {
@@ -146,6 +150,17 @@ fn perf_log_line(perf: &AnalyzePerf, response_encode: Duration) -> String {
         "holter-http-api: {} response_encode_ms={:.1}",
         perf.log_line(),
         response_encode.as_secs_f64() * 1000.0
+    )
+}
+
+/// Server-log line for an analyze request that failed after upload
+/// (license denial, inference or post-processing failure).
+fn failure_log_line(err: &HttpError) -> String {
+    format!(
+        "holter-http-api: analyze failed status={} code={} message={}",
+        err.status_code().as_u16(),
+        err.error_code(),
+        err.message()
     )
 }
 
@@ -645,6 +660,24 @@ pub(crate) mod tests {
         );
         assert!(line.starts_with("holter-http-api: perf: "), "{line}");
         assert!(!line.contains('\n'), "{line}");
+    }
+
+    #[test]
+    fn failure_log_line_reports_status_code_and_redacted_message() {
+        let err = HttpError::from(LicenseError::InferenceDenied(
+            crate::license::LicenseFailure::new(
+                LicenseFailureReason::TemporaryFailure,
+                "license server unreachable license_key=lk_secret",
+            ),
+        ));
+        let line = failure_log_line(&err);
+        assert!(
+            line.starts_with(
+                "holter-http-api: analyze failed status=503 code=license_temporarily_unavailable message=temporary_failure: license server unreachable"
+            ),
+            "{line}"
+        );
+        assert!(!line.contains("lk_secret"), "{line}");
     }
 
     #[test]

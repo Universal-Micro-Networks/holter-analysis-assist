@@ -8,7 +8,9 @@
 use std::sync::Mutex;
 
 use super::client::LicenseClient;
-use super::types::{LicenseError, LicenseFailure, LicenseFailureReason};
+use super::types::{
+    LicenseCheckResult, LicenseError, LicenseFailure, LicenseFailureReason, LicenseMeterResult,
+};
 
 /// Process-wide license gate wrapping a [`LicenseClient`].
 pub struct LicenseGate {
@@ -69,6 +71,7 @@ impl LicenseGate {
                     .unwrap_or_else(|| "validity check denied".into()),
             )));
         }
+        eprintln!("{}", verified_log_line(&result));
         Ok(())
     }
 
@@ -83,7 +86,42 @@ impl LicenseGate {
                     .unwrap_or_else(|| "authorize and meter denied".into()),
             )));
         }
+        eprintln!("{}", metered_log_line(&result));
         Ok(())
+    }
+}
+
+/// Stderr line for a successful startup validity check.
+fn verified_log_line(result: &LicenseCheckResult) -> String {
+    let limit = match result.monthly_limit {
+        Some(0) => "unlimited".to_string(),
+        Some(n) => n.to_string(),
+        None => "-".to_string(),
+    };
+    format!(
+        "license: verified status={} monthly_limit={limit}",
+        result.status.as_deref().unwrap_or("-")
+    )
+}
+
+/// Stderr line for a successful authorize-and-meter call.
+fn metered_log_line(result: &LicenseMeterResult) -> String {
+    match &result.usage {
+        Some(usage) if usage.is_unlimited() => {
+            format!(
+                "license: usage recorded used={} monthly_limit=unlimited",
+                usage.used
+            )
+        }
+        Some(usage) => format!(
+            "license: usage recorded used={} monthly_limit={} remaining={}",
+            usage.used,
+            usage.monthly_limit,
+            usage
+                .remaining
+                .map_or_else(|| "-".to_string(), |n| n.to_string())
+        ),
+        None => "license: usage recorded".to_string(),
     }
 }
 
@@ -541,5 +579,55 @@ mod tests {
             inference.ensure_inference_allowed().is_err(),
             "offline/unreachable must not bypass inference"
         );
+    }
+
+    #[test]
+    fn verified_log_line_reports_status_and_limit() {
+        let line = super::verified_log_line(&LicenseCheckResult {
+            allowed: true,
+            status: Some("active".into()),
+            monthly_limit: Some(0),
+            message: None,
+        });
+        assert_eq!(
+            line,
+            "license: verified status=active monthly_limit=unlimited"
+        );
+
+        let line = super::verified_log_line(&LicenseCheckResult {
+            allowed: true,
+            monthly_limit: Some(500),
+            ..Default::default()
+        });
+        assert_eq!(line, "license: verified status=- monthly_limit=500");
+    }
+
+    #[test]
+    fn metered_log_line_reports_usage_counters() {
+        use crate::license::types::UsageSnapshot;
+        let metered = |usage| {
+            super::metered_log_line(&LicenseMeterResult {
+                allowed: true,
+                usage,
+                message: None,
+            })
+        };
+        assert_eq!(
+            metered(Some(UsageSnapshot {
+                used: 3,
+                monthly_limit: 100,
+                remaining: Some(97),
+            })),
+            "license: usage recorded used=3 monthly_limit=100 remaining=97"
+        );
+        assert_eq!(
+            metered(Some(UsageSnapshot {
+                used: 7,
+                monthly_limit: 0,
+                remaining: None,
+            })),
+            "license: usage recorded used=7 monthly_limit=unlimited"
+        );
+        assert_eq!(metered(None), "license: usage recorded");
     }
 }

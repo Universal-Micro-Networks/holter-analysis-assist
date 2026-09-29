@@ -110,6 +110,25 @@ mod tests {
     }
 
     #[test]
+    fn console_explains_every_license_error_code() {
+        let js = asset_text("console.js");
+        for code in [
+            "license_temporarily_unavailable",
+            "license_inference_denied",
+            "license_rate_limited",
+        ] {
+            assert!(
+                js.contains(&format!("{code}:")),
+                "console.js must map '{code}' to a user-facing hint"
+            );
+        }
+        assert!(
+            js.contains("ライセンスサーバーに接続できない"),
+            "unreachable license server must be explained in Japanese"
+        );
+    }
+
+    #[test]
     fn embeds_vendored_bulma_with_license() {
         let css = asset_text("vendor/bulma.min.css");
         assert!(
@@ -299,7 +318,7 @@ mod tests {
             "帳票",
             "臨床最終判定",
             "課金ダッシュボード",
-            "ライセンスサーバー",
+            "ライセンスサーバー管理",
         ] {
             assert!(
                 !combined.contains(needle),
