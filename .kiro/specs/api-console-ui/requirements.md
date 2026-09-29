@@ -80,6 +80,9 @@
 1. If 解析エンドポイントがクライアントエラーまたはサーバーエラーを返す, the Holter Analysis Assist Console UI shall 解析成功として扱わず、失敗であることが分かるメッセージを日本語で表示する
 2. If 解析リクエストがタイムアウトまたは到達不可となる, the Holter Analysis Assist Console UI shall 失敗であることが分かるメッセージを日本語で表示する
 3. The Holter Analysis Assist Console UI shall エラー表示において、上流が返す識別可能な失敗種別がある場合は利用者が区別できる情報を提示する（詳細の内部スタックは必須としない）
+4. If 解析がライセンスによる失敗（ライセンスサーバーに接続できない・ライセンスにより許可されない・問い合わせ過多）で拒否される, the Holter Analysis Assist Console UI shall 失敗の理由と利用者が取るべき対処を日本語で先に示し、上流の失敗種別と概要を詳細として併記する
+
+> **改訂メモ（2026-09-29）**: 4 を追加した。初版ではライセンスの失敗も上流の英語の概要をそのまま表示しており、ライセンスサーバーに接続できないことが一目で分からなかった。案内文は上流の `error.code`（`license_temporarily_unavailable` / `license_inference_denied` / `license_rate_limited`）で選ぶ。案内文に「ライセンスサーバー」の語が含まれるが、10.2 が禁じるライセンスサーバー管理画面の提供にはあたらない。
 
 ### Requirement 6: ライセンス二重計上の禁止
 

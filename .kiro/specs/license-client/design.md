@@ -577,6 +577,9 @@ pub enum MockOutcome {
 
 ### Monitoring
 - stderr / エラー型 Display で区分と理由を出力
+- 成功時も `LicenseGate` が stderr に 1 行出す（13.1–13.4）。追加の要求は行わず、verify / usage の成功応答の値だけを使う
+  - 起動時: `license: verified status=<status|-> monthly_limit=<N|unlimited|->`
+  - 推論時: `license: usage recorded used=<N> monthly_limit=<N> remaining=<N|->`（上限なしは `used=<N> monthly_limit=unlimited`、使用量が無い応答は `license: usage recorded`）
 - ライセンスキーを含む行をログに出さないことをテストで固定
 
 ## Testing Strategy

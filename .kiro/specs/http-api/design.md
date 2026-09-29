@@ -422,6 +422,7 @@ impl HttpConfig {
 - HTTP 層で `ensure_inference_allowed` / `authorize_and_meter` を**呼ばない**（二重計上防止）
 - 本文サイズは middleware + 設定で制限
 - 解析完了ごとに段階別計測を 1 行ログ（`holter-http-api: perf: … response_encode_ms=…`）として stderr に出す（inference-acceleration）
+- 解析入口が失敗したら、`HttpError` に変換した内容を 1 行ログ（`holter-http-api: analyze failed status=<HTTP> code=<error.code> message=<秘密情報マスク済みの概要>`）として stderr に出す（8.5）。解析入口を呼ぶ前の検証（multipart・ファイル名・本文サイズ）は対象外で、ECL の内容不備で解析入口が返す 400 は対象
 
 **Dependencies**
 - Outbound: `analyze_ecl_with_model` / `analyze_ecl_with_source` — 解析と解析本体内 1 回計上 (P0)

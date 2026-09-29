@@ -173,14 +173,24 @@ license_key=lk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `unexpected_response` | サーバー応答を解釈できない。接続先の不一致（404・405 など）もここに入り、`server_url` の確認を促す | 403 `license_inference_denied` |
 | `gate_not_installed` | ライセンス確認の初期化前に解析が呼ばれた（内部エラー） | 403 `license_inference_denied` |
 
-HTTP API のエラー本文の `error.message` は `<理由コード>: <説明>` の形です（例: `monthly_limit_reached: The monthly usage limit has been reached.`）。429 / 503 は時間をおいて再試行できる拒否、403 は設定やライセンス状態の見直しが必要な拒否です。
+HTTP API のエラー本文の `error.message` は `<理由コード>: <説明>` の形です（例: `monthly_limit_reached: The monthly usage limit has been reached.`）。429 / 503 は時間をおいて再試行できる拒否、403 は設定やライセンス状態の見直しが必要な拒否です。解析時の拒否は、サーバーの標準エラーにも `holter-http-api: analyze failed status=<HTTP> code=<error.code> message=<error.message>` の 1 行で出ます。コンソール画面では、この 3 種類のライセンスの拒否を日本語の理由と対処（例:「ライセンスサーバーに接続できないため、解析を実行できませんでした。…」）で表示し、その後ろに「詳細:」として `error.code` と `error.message` を併記します。
+
+成功時も、ライセンスサーバーとのやり取りを標準エラーに 1 行ずつ出します（ライセンスキーは出しません）。つながっているかは、この行で確認できます。
+
+```text
+# 起動時の有効性確認に成功
+license: verified status=active monthly_limit=unlimited
+
+# 解析ごとの利用記録に成功（上限ありは used / monthly_limit / remaining、上限なしは monthly_limit=unlimited）
+license: usage recorded used=12 monthly_limit=100 remaining=88
+```
 
 旧設定からの移行:
 
 - `api_key` は `license_key` に書き換えてください（`api_key` だけの ini は設定エラーで起動しません。両方ある場合は `license_key` を使い、警告を 1 行出します）
 - `check_path` / `meter_path` は廃止です。削除してください（書かれていると設定エラーで起動しません）
 
-範囲外: 当月の利用状況（使用回数・残り回数）の照会・表示と、ライセンスの発行・停止などの管理用 API は本製品では扱いません。
+範囲外: 当月の利用状況（使用回数・残り回数）の照会・画面表示と、ライセンスの発行・停止などの管理用 API は本製品では扱いません（上記の `license: usage recorded` 行は、利用記録の応答に含まれる値をログに書くだけです）。
 
 ## HTTP API / UI コンソールの使い方
 

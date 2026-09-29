@@ -121,6 +121,9 @@
 2. When ライセンス推論拒否により解析できない, the Holter Analysis Assist HTTP Service shall 推論拒否として識別可能な応答を返す
 3. When サーバー内部エラーにより解析できない, the Holter Analysis Assist HTTP Service shall サーバーエラーとして識別可能な応答を返す
 4. The Holter Analysis Assist HTTP Service shall 失敗応答に、少なくとも失敗区分と、呼出側が次の行動を判断できる概要を含める（秘密情報の平文は含めない）
+5. When アップロード受理後の解析が ECL 内容の不備・ライセンス推論拒否・推論失敗・後処理失敗などで失敗する, the Holter Analysis Assist HTTP Service shall 応答の HTTP ステータス・失敗区分・概要を、秘密情報の平文を含めずにサーバーの標準エラーへ 1 行出力する
+
+> **改訂メモ（2026-09-29）**: 5 を追加した。初版では失敗が応答にしか現れず、サーバーのログからはライセンスサーバーに到達できなかったことなどが分からなかった。
 
 ### Requirement 9: 対象プラットフォームと library-first
 
