@@ -48,6 +48,9 @@
 2. When 起動時の有効性確認が成功する, the Holter Analysis Assist shall 通常の起動処理を続行する
 3. If 起動時の有効性確認が失敗する（拒否・通信不能・タイムアウト・設定不備を含む）, the Holter Analysis Assist shall 起動を拒否し、解析処理を開始しない
 4. The Holter Analysis Assist shall 起動時確認の失敗理由を、オペレータが起動失敗と識別できる形で提示する
+5. The Holter Analysis Assist shall 起動時確認の失敗を `LicenseGate` に保持し、保持している間の推論時確認は利用記録を要求せずに同じ失敗理由で拒否する。後の有効性確認が成功した時点で保持を解除する
+
+> **改訂メモ（2026-09-29）**: 5 を追加した。HTTP サービスは、起動時確認に失敗しても受付を開始して画面に警告を出し、30 秒ごとに確認をやり直す（`http-api` Requirement 3.3・3.4）。そのため「起動を拒否する」（3）は CLI にのみ適用し、HTTP ではこの保持によって確認が通るまで解析を止める。
 
 ### Requirement 2: 1 推論ごとの許可確認と利用計上
 

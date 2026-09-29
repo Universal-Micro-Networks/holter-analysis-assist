@@ -2,7 +2,7 @@
 
 ## Overview
 
-本機能は、Holter Analysis Assist に薄い HTTP サーバーバイナリを追加し、連携システムが ECL を送信して CLI と同一コアの解析結果を受け取れるようにする。運用オペレータは ini でリッスンとライセンスを設定し、起動時ライセンス失敗時はポートを開かない。各解析リクエストは lib の解析本体（正本入口 `analyze_ecl_with_source`、および常駐モデル用の `analyze_ecl_with_model`）内の上流ゲート経由で 1 回だけ計上される（HTTP は meter を直接呼ばない）。
+本機能は、Holter Analysis Assist に薄い HTTP サーバーバイナリを追加し、連携システムが ECL を送信して CLI と同一コアの解析結果を受け取れるようにする。運用オペレータは ini でリッスンとライセンスを設定し、起動時ライセンス失敗時は受付を開始したうえで、30 秒ごとの再確認が通るまで解析を拒否する（2026-09-29 改訂。設定・モデルの失敗ではポートを開かない）。各解析リクエストは lib の解析本体（正本入口 `analyze_ecl_with_source`、および常駐モデル用の `analyze_ecl_with_model`）内の上流ゲート経由で 1 回だけ計上される（HTTP は meter を直接呼ばない）。
 
 **実装同期（2026-09-29）**: 実装に合わせて次を反映した。(1) 本番経路はモデルを起動時に 1 回ロード・暖機して常駐させ（`Arc<Mutex<Phase2Model>>`。リクエストは直列化）、解析は `analyze_ecl_with_model` を呼ぶ。`analyze_ecl_with_source` はリクエスト単位の provider 上書き時とテスト用の非常駐経路で使う（inference-acceleration の design「HttpStateAdapter」を参照）。(2) 利用記録の位置は正本入口の先頭ではなく「前処理の後・最初の推論の直前」（license-client の design「AnalyzeEntryIntegration」）。(3) `[http]` に推論設定キー（`batch_size` と `cuda_*`。inference-acceleration OWN）が加わった。(4) 起動処理は lib（`src/http/startup.rs` の `run_blocking`）に置き、`holter-http-api` と CLI の `serve-http` の両方から呼ぶ。(5) 出力形式はクエリ `?format=` でも指定できる。
 
@@ -266,8 +266,10 @@ sequenceDiagram
 | 2.4 | 上流契約を再定義しない | Boundary Commitments | ModelSource, LicenseGate | — |
 | 3.1 | 起動時 install + 有効性確認 1 回 | HttpStartup | `LicenseGate::install`, `ensure_startup_licensed` | 起動 |
 | 3.2 | 成功時リッスン開始 | HttpStartup | bind | 起動 |
-| 3.3 | 失敗時非リッスン | HttpStartup | exit non-zero | 起動 |
-| 3.4 | 起動失敗の識別可能提示 | HttpStartup, HttpError | stderr | 起動 |
+| 3.3 | 有効性確認の失敗時は受付を開始し解析を拒否 | HttpStartup, LicenseGate | `install_license_gate_for_http`, `startup_failure` | 起動 |
+| 3.4 | 30 秒ごとの再確認と解析再開 | HttpStartup | `recheck_license_until_verified` | 起動後 |
+| 3.5 | 設定・モデル失敗時は非リッスン | HttpStartup | exit non-zero | 起動 |
+| 3.6 | 失敗理由の識別可能提示 | HttpStartup, HttpError | stderr | 起動 |
 | 4.1 | 解析前に許可+計上 1 回（正本内） | AnalyzeHandler → lib 解析入口 | `analyze_ecl_with_model` / `analyze_ecl_with_source`（共通の解析本体で計上） | 解析リクエスト |
 | 4.2 | 計上成功で解析許可 | 正本入口 upstream | Ok | 解析リクエスト |
 | 4.3 | 計上失敗で結果非返却 | AnalyzeHandler, HttpError | 403 / 429 / 503 | 解析リクエスト |
@@ -359,12 +361,14 @@ impl HttpConfig {
 | Field | Detail |
 |-------|--------|
 | Intent | fail-closed で設定読取・process-wide Gate install・起動ゲート・リッスンを順序付けする |
-| Requirements | 3.1, 3.2, 3.3, 3.4, 6.4, 9.1 |
+| Requirements | 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 6.4, 9.1 |
 
 **Responsibilities & Constraints**
 - 順序: load `[http]` → load `[license]`・構築 `LicenseGate` → **`LicenseGate::install`** → **`ensure_startup_licensed`** → `AppState::from_config`（モデルロード・暖機）→ bind → `axum::serve`
 - CLI と同一の process-wide install 契約（license-client Cross-spec）。別経路の Gate を再発明しない
-- いずれかの失敗（モデルのロード・暖機の失敗を含む）で listen せず非 0 終了
+- `ensure_startup_licensed` の `StartupFailed`（拒否・到達不能・タイムアウト・要求過多）だけは終了せずに続行する（`install_license_gate_for_http`）。stderr に `license: startup check failed code=<error.code> message=<error.message>; serving with analysis disabled, retrying every 30s` を出す（`message` は API エラーと同じくキーを伏せる）。失敗は `LicenseGate` に保持され、保持中の解析は利用記録なしで同じ理由の推論拒否（403 / 429 / 503）になる（license-client 1.5）
+- bind 後、失敗を保持していれば `recheck_license_until_verified` を起動し、`LICENSE_RECHECK_INTERVAL`（30 秒）ごとに `ensure_startup_licensed` を `spawn_blocking` でやり直す。失敗のたびに `license: recheck failed code=... message=...`、成功時は `license: verified ...` と `license: recheck passed; analysis enabled` を出して終了する
+- それ以外の失敗（ini・ライセンス設定の `Config`、install の二重実行、モデルのロード・暖機、bind）では listen せず非 0 終了
 - 起動処理は lib の `src/http/startup.rs`（同期入口 `run_blocking`）に置く。`holter-http-api`（`src/bin/holter_http_api.rs`）と CLI の `serve-http` サブコマンドはどちらもこれを呼ぶだけで、バイナリ同士は相互 import しない。`serve-http` は CLI 既定の `license.ini` による起動確認を行わず、`--config`（既定 `config/http.ini`、`HOLTER_HTTP_INI`）の `[license]` で 1 回だけ install する（Windows で `holter-http-api.exe` がアプリ制御にブロックされる場合の代替起動手段）
 
 **Contracts**: Service [x]
@@ -393,16 +397,17 @@ impl HttpConfig {
 | Field | Detail |
 |-------|--------|
 | Intent | プロセス受付可否を返す |
-| Requirements | 5.1, 5.2, 5.3 |
+| Requirements | 5.1, 5.2, 5.3, 5.4 |
 
 **Contracts**: API [x]
 
 ##### API Contract
 | Method | Endpoint | Request | Response | Errors |
 |--------|----------|---------|----------|--------|
-| GET | `/health` | なし | `200` + `{ "status": "ok" }` | サービス未起動時は到達不可 |
+| GET | `/health` | なし | `200` + `{ "status": "ok", "license": { "state": "ok" } }` | サービス未起動時は到達不可 |
 
-- Invariants: meter / analyze を呼び出さない
+- 起動時の有効性確認に失敗している間は `"license": { "state": "unavailable", "code": "<error.code>", "message": "<error.message>" }`。`code` / `message` は `HttpError::from(LicenseError::InferenceDenied(failure))` で作り、その間の解析リクエストが受けるエラーと一致する
+- Invariants: meter / analyze を呼び出さない。ライセンス状態は `LicenseGate::startup_failure()` の保持値を読むだけで、ライセンスサーバーへ問い合わせない
 
 #### AnalyzeHandler
 
@@ -502,7 +507,7 @@ impl HttpConfig {
 ## Error Handling
 
 ### Error Strategy
-- 起動: fail-closed、非リッスン、stderr に起動失敗区分
+- 起動: 設定・モデルの失敗は非リッスンで終了し、stderr に起動失敗区分。ライセンスの有効性確認の失敗は受付を開始し、確認が通るまで解析を拒否（`/health` の `license` と stderr で理由を示す）
 - リクエスト: 上記マッピング。部分結果を返さない
 - 上流 `LicenseError::InferenceDenied` を拒否理由で振り分ける（型マッチ）。要求過多は 429、一時障害は 503、それ以外は 403
 

@@ -11,7 +11,7 @@
 **Impact**: ライセンスサーバーに到達できない環境では起動も解析もできなくなる（暫定許可の撤廃）。既存 ini の `api_key` / `check_path` / `meter_path` は使えなくなり、`license_key` の設定が必須になる。
 
 ### Goals
-- 起動時 1 回の有効性確認（`POST /v1/licenses/verify`。失敗時は起動拒否）
+- 起動時 1 回の有効性確認（`POST /v1/licenses/verify`。失敗時、CLI は起動拒否。HTTP は Gate が失敗を保持し、再確認が通るまで推論を拒否する）
 - 1 推論（正本入口 `analyze_ecl_with_source`）ごとに推論直前の利用記録（`POST /v1/usage`。201 のときだけ推論）。ラッパでの二重計上なし
 - 拒否理由の区分（キー設定不備・ライセンス無効・利用停止・当月上限到達・要求過多・一時障害）と、HTTP API での再試行可否の区別
 - 月間上限 0（上限なし）ライセンスを正しく扱う
@@ -250,6 +250,7 @@ sequenceDiagram
 | Requirement | Summary | Components | Interfaces | Flows |
 |-------------|---------|------------|------------|-------|
 | 1.1–1.4 | 起動時有効性確認と起動拒否 | LicenseGate, ReqwestLicenseClient, CliStartup | `ensure_startup_licensed`, `check_validity`, `install` | 起動時確認 |
+| 1.5 | 起動時確認の失敗の保持と、保持中の推論拒否 | LicenseGate | `startup_failure`, `ensure_inference_allowed` | 起動時確認・推論時確認 |
 | 2.1–2.6 | 推論時の利用記録、window 非計上、入力不備では非計上 | LicenseGate, AnalyzeEntry | `ensure_inference_allowed`, `authorize_and_meter` | 1 推論ごと |
 | 3.1–3.4 | 1 推論 = 解析ジョブ、ラッパ非二重計上 | AnalyzeEntry, LicenseGate | 正本入口のみ | 1 推論ごと |
 | 4.1–4.6 | ini 設定・同一キー・正本 sample・必須欠落 fail-closed | LicenseConfig, LicenseIniDocs | `LicenseConfig::load_from_path`, `config/license.ini.example` | 起動時確認 |
@@ -569,7 +570,7 @@ pub enum MockOutcome {
 | 状況 | エラー | CLI | HTTP API |
 |------|--------|-----|----------|
 | ini 欠落・`server_url` / `license_key` 欠落・`api_key` 単独・廃止キー・不正値 | `Config` | 起動拒否（非 0 終了） | 起動拒否（listen しない） |
-| verify 失敗（各理由） | `StartupFailed(reason)` | 起動拒否 | 起動拒否 |
+| verify 失敗（各理由） | `StartupFailed(reason)` | 起動拒否 | 受付は開始し、Gate が失敗を保持している間は解析を利用記録なしで拒否（理由に応じて 403 / 429 / 503）。30 秒ごとに再確認（1.5、`http-api` 3.3・3.4） |
 | usage 失敗（永続的な理由） | `InferenceDenied(reason)` | 解析失敗・出力なし | 403 `license_inference_denied` |
 | usage 失敗（`rate_limited`） | `InferenceDenied(rate_limited)` | 解析失敗・出力なし | 429 `license_rate_limited` |
 | usage 失敗（`temporary_failure`・到達不能・タイムアウト） | `InferenceDenied(temporary_failure)` | 解析失敗・出力なし | 503 `license_temporarily_unavailable` |
@@ -593,7 +594,7 @@ pub enum MockOutcome {
 
 ### Integration Tests
 - CLI 起動（`tests/cli_license_startup.rs`）: verify 成功で続行、`license_invalid` / `license_suspended` / 到達不能で非 0 終了と理由表示、`license_key` 未設定・`api_key` 単独で起動拒否（1.x, 12.2, 12.3）
-- HTTP（`tests/http_api_listen.rs`）: 起動時 verify の失敗で listen しない、解析で usage が 1 回、`monthly_limit_reached` で 403、`temporary_failure` で 503、要求過多で 429（2.x, 11.7）
+- HTTP（`tests/http_api_listen.rs`）: 起動時 verify の失敗でも listen し、`/health` が `license.state=unavailable` を返し、解析は usage なしで拒否される（1.5）、解析で usage が 1 回、`monthly_limit_reached` で 403、`temporary_failure` で 503、要求過多で 429（2.x, 11.7）
 - 既存の CLI・比較・推論オプション系テストが共通モック（上限なし成功）で従来どおり通る（回帰）
 - window 複数でも usage 呼び出しが 1 回（2.5, 3.3。既存テストを維持）
 

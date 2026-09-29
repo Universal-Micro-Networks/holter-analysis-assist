@@ -2,7 +2,7 @@
 
 ## Introduction
 
-本仕様は、ホルター解析支援アプリケーション（Holter Analysis Assist）に HTTP による解析面を追加し、クラウド連携や他システムから ECL 入力に対する解析を呼べるようにする。解析品質・埋め込みモデル利用・ライセンスゲートは CLI と同一コアを共有し、起動時は `LicenseGate::install` と有効性確認に失敗した場合はサーバーを起動しない。各解析リクエストでは正本入口 `analyze_ecl_with_source` 内で許可確認・利用計上を 1 回行う（HTTP は meter を直接呼ばない。ONNX window 単位ではない）。ライセンスサーバー本体、配布パッケージ本体、本格的な利用者認証（IAM / OAuth）は本仕様の範囲外とする。
+本仕様は、ホルター解析支援アプリケーション（Holter Analysis Assist）に HTTP による解析面を追加し、クラウド連携や他システムから ECL 入力に対する解析を呼べるようにする。解析品質・埋め込みモデル利用・ライセンスゲートは CLI と同一コアを共有し、起動時は `LicenseGate::install` と有効性確認を行い、有効性確認に失敗した場合は受付を開始したうえで、確認が通るまで解析を拒否する（2026-09-29 改訂。Requirement 3 参照）。各解析リクエストでは正本入口 `analyze_ecl_with_source` 内で許可確認・利用計上を 1 回行う（HTTP は meter を直接呼ばない。ONNX window 単位ではない）。ライセンスサーバー本体、配布パッケージ本体、本格的な利用者認証（IAM / OAuth）は本仕様の範囲外とする。
 
 **実装メモ（2026-09-29）:** 実装ではモデルを起動時に常駐させ、通常のリクエストは `analyze_ecl_with_model` を呼ぶ（provider 上書き時は `analyze_ecl_with_source`）。両者は同じ解析本体を通り、許可確認・利用計上はその中で前処理後・推論直前に 1 回だけ行われるため、本書の「正本入口 `analyze_ecl_with_source` を呼ぶ」「1 リクエスト 1 回」の意図（HTTP 層で計上しない、二重計上しない）は保たれている。詳細は design.md。
 
@@ -11,7 +11,7 @@
 - **In scope**:
   - ECL（または合意した解析入力）を受け取り、解析結果（少なくとも CLI と同等の CSV 相当、および機械可読な JSON 要約または行データ）を返す解析用 HTTP エンドポイント
   - ヘルスチェック等の最小運用エンドポイント
-  - プロセス起動時のライセンス有効性確認（失敗時は HTTP サービスをリッスンしない）
+  - プロセス起動時のライセンス有効性確認（失敗時は確認が通るまで解析を拒否し、30 秒ごとに再確認する）
   - 各解析リクエストあたり 1 回のライセンス許可確認・利用計上（正本入口内。HTTP は meter を直接呼ばない。失敗時は解析結果を返さない）
   - 埋め込みモデル経路を用いた推論（配布想定）と、開発用途でのパス指定モデルの利用方針
   - リッスンアドレス等の HTTP 設定（`[http]`）およびライセンス接続設定を ini で読み取ること（`[license]` キー名は `license-client` 正本と同一。再定義しない）
@@ -54,16 +54,20 @@
 3. Where 開発用のパス指定モデルロードが有効である, the Holter Analysis Assist HTTP Service shall 設定または同等の明示手段でパス指定モデルを利用できる
 4. The Holter Analysis Assist HTTP Service shall ライセンスゲートおよびモデルソース契約を、上流仕様で定義された公開契約と矛盾する形で再定義しない
 
-### Requirement 3: 起動時ライセンス確認とサーバー起動拒否
+### Requirement 3: 起動時ライセンス確認と、確認できない間の解析停止
 
-**Objective:** As an 運用オペレータ, I want 起動時にライセンスが無効なら HTTP サービスが立たない, so that 無許可環境でリッスン面が露出しない
+**Objective:** As an 運用オペレータ, I want 起動時にライセンスを確認できないとき、解析は止まったまま理由が画面とログで分かる, so that 無許可の解析を防ぎつつ、接続障害などの原因にすぐ気づける
 
 #### Acceptance Criteria
 
 1. When HTTP サービスプロセスが起動する, the Holter Analysis Assist HTTP Service shall 上流 `LicenseGate` を process-wide に `install` し、有効性確認（`ensure_startup_licensed`）を 1 回行う
 2. When 起動時の有効性確認が成功する, the Holter Analysis Assist HTTP Service shall 設定されたアドレスでリクエスト受付を開始する
-3. If 起動時の有効性確認が失敗する（拒否・通信不能・タイムアウト・設定不備を含む）, the Holter Analysis Assist HTTP Service shall HTTP ポートのリッスンを開始せず、起動失敗として識別可能な形で終了する
-4. The Holter Analysis Assist HTTP Service shall 起動失敗の理由を、オペレータが起動失敗と識別できる形で提示する
+3. If 起動時の有効性確認が失敗する（拒否・通信不能・タイムアウト・要求過多）, the Holter Analysis Assist HTTP Service shall リクエスト受付は開始するが、有効性確認が成功するまで解析リクエストを利用記録なしで推論拒否として応答し、失敗理由を標準エラーに 1 行出力する
+4. While 起動時の有効性確認が成功していない, the Holter Analysis Assist HTTP Service shall 30 秒ごとに有効性確認をやり直し、成功した時点で解析の受付を再開して、その旨を標準エラーに出力する
+5. If ini の読み込み・ライセンス設定・モデルの読み込みに失敗する, the Holter Analysis Assist HTTP Service shall HTTP ポートのリッスンを開始せず、起動失敗として識別可能な形で終了する
+6. The Holter Analysis Assist HTTP Service shall 起動失敗および有効性確認の失敗理由を、オペレータが識別できる形で（ライセンスキーを含めずに）提示する
+
+> **改訂メモ（2026-09-29）**: 初版の 3.3 は「有効性確認に失敗したらリッスンせずに終了する」だった。この場合コンソール画面そのものが開けず、ライセンスサーバーに接続できないことが利用者に伝わらなかったため、起動は続けて画面に警告を出し続ける形に改めた（3.3・3.4 を変更・追加し、設定・モデルの失敗は従来どおり 3.5 で終了）。解析は確認が通るまで拒否し、その間は利用記録の要求も送らないため、無許可で解析できない点（fail-closed）は変わらない。CLI の起動時の扱い（失敗したら終了）は変えない。
 
 ### Requirement 4: 解析リクエストごとのライセンス確認・計上
 
@@ -86,6 +90,9 @@
 1. When 利用者がヘルスチェック用エンドポイントへ問い合わせる, the Holter Analysis Assist HTTP Service shall プロセスがリクエストを受け付け可能な状態であることを示す成功応答を返す
 2. The Holter Analysis Assist HTTP Service shall ヘルスチェック応答のために利用計上（meter）を行わない
 3. The Holter Analysis Assist HTTP Service shall ヘルスチェックを、解析エンドポイントとは区別可能な経路として提供する
+4. The Holter Analysis Assist HTTP Service shall ヘルスチェック応答に、直近の起動時有効性確認の結果（成功、または失敗時は解析リクエストが受けるのと同じエラーコードと概要）を含める。このためにライセンスサーバーへ問い合わせない
+
+> **改訂メモ（2026-09-29）**: 4 を追加した（3.3 の改訂に伴い、コンソールが警告を出すための情報源）。応答例: `{"status":"ok","license":{"state":"ok"}}`、失敗時は `{"status":"ok","license":{"state":"unavailable","code":"license_temporarily_unavailable","message":"temporary_failure: ..."}}`。プロセスは受け付け可能なので `status` は `ok` のままとする。
 
 ### Requirement 6: ini による HTTP およびライセンス設定
 

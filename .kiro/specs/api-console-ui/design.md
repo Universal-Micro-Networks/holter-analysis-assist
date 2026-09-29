@@ -157,6 +157,7 @@ sequenceDiagram
 **Key decisions**: UI サーバー側は analyze 前後で meter を呼ばない。計上は既存 AnalyzeHandler → 正本入口のみ。
 
 ### 失敗表示
+- 表示位置（5.5）: 失敗メッセージは画面右上（上部バーの直下）に固定したトーストで出す。トーストは `role="alert"`、見出し「エラー」、本文、閉じるボタン（「閉じる」）からなる。自動では消さず、閉じるボタンか次の解析開始で消す。表示中のトーストは常に 1 件（新しい失敗は前のトーストを置き換える）。本文は `textContent` で入れ、理由・対処と「詳細」は改行で分ける
 - 未選択ファイル: リクエスト送信前に日本語メッセージ
 - 4xx/5xx・ネットワーク／タイムアウト: 日本語で失敗表示。可能なら上流 JSON の `error` / 種別を併記
 - ライセンスの失敗（5.4）: 上流 JSON の `error.code` で日本語の案内文を選び、「解析に失敗しました（HTTP n）。」＋案内文＋「詳細: `code: message`」の順に表示する
@@ -167,6 +168,14 @@ sequenceDiagram
 | `license_inference_denied` | 403 | ライセンスにより許可されない。ライセンスの有効状態と月間の利用上限を確認 |
 | `license_rate_limited` | 429 | 問い合わせが集中している。しばらく待って再実行 |
 
+- 起動時のライセンス確認の失敗（2.4）: `/health` の `license.state` が `unavailable` の間、上部バー直下に警告帯 `#license-banner`（`role="alert"`、閉じるボタンなし）を出し続ける。見出しは「ライセンスを確認できていないため、解析を実行できません」、本文は `license.code` ごとの文面＋「サーバーが 30 秒ごとに自動で再確認し、確認できるとこの表示は消えます。」＋改行＋「詳細: `code: message`」。右上のヘルス表示は「ライセンス未確認」（赤）。`license.state` が `ok` に戻った次のヘルス確認（最大 10 秒後）で消える
+
+| `license.code` | 警告帯の文面の要旨 |
+|---|---|
+| `license_temporarily_unavailable` | ライセンスサーバーに接続できない。ネットワークとライセンスサーバーの稼働状況を確認 |
+| `license_inference_denied` | ライセンスが有効と認められなかった。ライセンスの有効状態と設定されたライセンスキーを確認 |
+| `license_rate_limited` | 問い合わせが集中している。しばらく待つ |
+
 - 範囲外機能の混入を防ぐアセット検査の禁止語は、要件 10.2 の文言どおり「ライセンスサーバー管理」とする（案内文の「ライセンスサーバー」は許容）
 
 ## Requirements Traceability
@@ -176,10 +185,10 @@ sequenceDiagram
 | 1.1 | コンソール配信 | StaticUiHandler, Assets | GET `/ui/` | open UI |
 | 1.2 | 同一プロセス配信 | Assets, routes | embed | — |
 | 1.3 | 経路の区別 | routes | `/ui/` vs `/health` `/v1/analyze` | — |
-| 2.1–2.3 | ヘルス確認（自動、10 秒ごと） | ConsoleClient, HealthHandler | GET `/health` | health |
+| 2.1–2.4 | ヘルス確認（自動、10 秒ごと）、ライセンス未確認の警告帯 | ConsoleClient, HealthHandler | GET `/health` | health |
 | 3.1–3.4 | アップロード／解析 | ConsoleClient, AnalyzeHandler | POST `/v1/analyze` | analyze |
 | 4.1–4.4 | 結果表示／DL | ConsoleClient | blob download | analyze success |
-| 5.1–5.3 | エラー表示 | ConsoleClient | error UI | analyze fail |
+| 5.1–5.5 | エラー表示（右上トースト） | ConsoleClient | toast UI | analyze fail |
 | 6.1–6.3 | 二重計上禁止 | StaticUiHandler, ConsoleClient | no meter | — |
 | 7.1–7.2 | 日本語文言 | index.html, ConsoleClient | copy | — |
 | 8.1–8.2 | 上限は上流準拠 | ConsoleClient | http-api limits | — |

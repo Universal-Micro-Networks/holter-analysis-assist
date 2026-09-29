@@ -83,7 +83,7 @@ HOLTER_EMBEDDED_MODEL_PATH=/path/to/model.onnx \
 - 入力は ECL（250 Hz、16 bit LE）。ファイル名 `[serial]_[yyyyMMdd]_[HHmm]_[HHmm].ecl` から記録範囲を決める。24 時間未満はエラー、7 日（`MAX_RECORDING_DAYS`）を超える分は切り捨てて警告する
 - 推論重みは `resources/models/` に置き、Git には含めない（配布は `embedded-model` でバイナリへ埋め込む）
 - EP 選択は実行時: `auto` は CUDA → CPU の順に試す。ini / HTTP の `provider` は `gpu` / `nvidia` を `cuda` の別名として受け付ける。CoreML EP は精度劣化のため採用しない
-- ライセンスは fail-closed（起動時確認に失敗したら CLI は実行せず、HTTP はリッスンしない。オフライン回避なし）
+- ライセンスは fail-closed（起動時確認に失敗したら CLI は実行しない。HTTP は受付を開始して画面・`/health` に警告を出すが、30 秒ごとの再確認が通るまで解析は利用記録なしで拒否する。オフライン回避なし）
 
 ---
 _Document standards and patterns, not every dependency_
