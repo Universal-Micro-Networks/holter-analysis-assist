@@ -15,6 +15,8 @@ use super::types::{
 /// Process-wide license gate wrapping a [`LicenseClient`].
 pub struct LicenseGate {
     client: Box<dyn LicenseClient>,
+    /// Last startup validity failure; while set, inference is denied without metering.
+    startup_failure: Mutex<Option<LicenseFailure>>,
 }
 
 static GLOBAL_GATE: Mutex<Option<&'static LicenseGate>> = Mutex::new(None);
@@ -28,6 +30,7 @@ impl LicenseGate {
     pub fn new(client: impl LicenseClient + 'static) -> Self {
         Self {
             client: Box::new(client),
+            startup_failure: Mutex::new(None),
         }
     }
 
@@ -61,7 +64,37 @@ impl LicenseGate {
     }
 
     /// Startup gate: validity check only (no meter). Ok only when allowed.
+    ///
+    /// The outcome is remembered: a `StartupFailed` result blocks inference until a
+    /// later call succeeds (see [`Self::startup_failure`]).
     pub fn ensure_startup_licensed(&self) -> Result<(), LicenseError> {
+        let outcome = self.check_validity_once();
+        match &outcome {
+            Ok(()) => self.set_startup_failure(None),
+            Err(LicenseError::StartupFailed(failure)) => {
+                self.set_startup_failure(Some(failure.clone()))
+            }
+            Err(_) => {}
+        }
+        outcome
+    }
+
+    /// Failure of the latest startup validity check, if it did not pass.
+    pub fn startup_failure(&self) -> Option<LicenseFailure> {
+        match self.startup_failure.lock() {
+            Ok(slot) => slot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn set_startup_failure(&self, failure: Option<LicenseFailure>) {
+        match self.startup_failure.lock() {
+            Ok(mut slot) => *slot = failure,
+            Err(poisoned) => *poisoned.into_inner() = failure,
+        }
+    }
+
+    fn check_validity_once(&self) -> Result<(), LicenseError> {
         let result = self.client.check_validity()?;
         if !result.allowed {
             return Err(LicenseError::StartupFailed(LicenseFailure::new(
@@ -76,7 +109,12 @@ impl LicenseGate {
     }
 
     /// Inference gate: authorize + meter. Ok only when allowed.
+    ///
+    /// Denied without contacting the server while the startup check has not passed.
     pub fn ensure_inference_allowed(&self) -> Result<(), LicenseError> {
+        if let Some(failure) = self.startup_failure() {
+            return Err(LicenseError::InferenceDenied(failure));
+        }
         let result = self.client.authorize_and_meter()?;
         if !result.allowed {
             return Err(LicenseError::InferenceDenied(LicenseFailure::new(
@@ -338,6 +376,70 @@ mod tests {
             0,
             "startup must not call authorize_and_meter"
         );
+    }
+
+    /// Validity check fails until `reachable` is set; meter always succeeds.
+    struct RecoveringClient {
+        reachable: Arc<std::sync::atomic::AtomicBool>,
+        meter_calls: Arc<AtomicUsize>,
+    }
+
+    impl LicenseClient for RecoveringClient {
+        fn check_validity(&self) -> Result<LicenseCheckResult, LicenseError> {
+            if self.reachable.load(Ordering::SeqCst) {
+                Ok(LicenseCheckResult {
+                    allowed: true,
+                    ..Default::default()
+                })
+            } else {
+                Err(LicenseError::StartupFailed(LicenseFailure::new(
+                    LicenseFailureReason::TemporaryFailure,
+                    "license server unreachable",
+                )))
+            }
+        }
+
+        fn authorize_and_meter(&self) -> Result<LicenseMeterResult, LicenseError> {
+            self.meter_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(LicenseMeterResult {
+                allowed: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn failed_startup_blocks_inference_without_metering_until_recheck_passes() {
+        let reachable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let meter_calls = Arc::new(AtomicUsize::new(0));
+        let gate = LicenseGate::new(RecoveringClient {
+            reachable: Arc::clone(&reachable),
+            meter_calls: Arc::clone(&meter_calls),
+        });
+
+        assert!(gate.ensure_startup_licensed().is_err());
+        let failure = gate
+            .startup_failure()
+            .expect("startup failure is remembered");
+        assert_eq!(failure.reason, LicenseFailureReason::TemporaryFailure);
+
+        let err = gate
+            .ensure_inference_allowed()
+            .expect_err("inference must stay denied after a failed startup check");
+        assert_eq!(err, LicenseError::InferenceDenied(failure));
+        assert_eq!(
+            meter_calls.load(Ordering::SeqCst),
+            0,
+            "denied inference must not be metered"
+        );
+
+        reachable.store(true, Ordering::SeqCst);
+        gate.ensure_startup_licensed()
+            .expect("recheck succeeds once the server is back");
+        assert_eq!(gate.startup_failure(), None);
+        gate.ensure_inference_allowed()
+            .expect("inference is allowed after a passing recheck");
+        assert_eq!(meter_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

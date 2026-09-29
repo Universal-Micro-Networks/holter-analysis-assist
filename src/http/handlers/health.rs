@@ -3,22 +3,61 @@
 //! Requirements 5.1–5.3. Analyze route wiring is a later task; this module
 //! owns only the health response and its non-metering invariant.
 
+use crate::http::error::HttpError;
+use crate::license::{LicenseError, LicenseGate};
 use axum::Json;
 use serde::Serialize;
 
 /// Health-check handler (design: HealthHandler).
 pub struct HealthHandler;
 
-/// Success body: `{ "status": "ok" }`.
+/// Success body: `{ "status": "ok", "license": { "state": "ok" } }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HealthBody {
     pub status: &'static str,
+    pub license: LicenseHealth,
+}
+
+/// Cached result of the startup validity check (never queried per request).
+///
+/// `unavailable` carries the same `code` / `message` an analyze request would get.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LicenseHealth {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl LicenseHealth {
+    fn current() -> Self {
+        match LicenseGate::try_global().and_then(LicenseGate::startup_failure) {
+            None => Self {
+                state: "ok",
+                code: None,
+                message: None,
+            },
+            Some(failure) => {
+                let err = HttpError::from(LicenseError::InferenceDenied(failure));
+                Self {
+                    state: "unavailable",
+                    code: Some(err.error_code()),
+                    message: Some(err.message().to_string()),
+                }
+            }
+        }
+    }
 }
 
 impl HealthHandler {
-    /// Pure success body used by the route handler (no LicenseGate / analyze).
+    /// Body used by the route handler: reads the cached license state only
+    /// (no license server call, no meter, no analyze).
     pub fn body() -> HealthBody {
-        HealthBody { status: "ok" }
+        HealthBody {
+            status: "ok",
+            license: LicenseHealth::current(),
+        }
     }
 
     /// Axum handler: indicate the process can accept requests.
@@ -62,6 +101,31 @@ mod tests {
             self.meter_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.authorize_and_meter()
         }
+    }
+
+    #[test]
+    fn health_reports_cached_startup_license_failure() {
+        let _guard = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        LicenseGate::clear_for_test();
+        LicenseGate::install(LicenseGate::new(MockLicenseClient::new(
+            MockOutcome::TransportFail {
+                message: "connection refused".into(),
+            },
+            MockOutcome::Success { message: None },
+        )))
+        .expect("install");
+        assert_eq!(HealthHandler::body().license.state, "ok");
+
+        assert!(LicenseGate::global().ensure_startup_licensed().is_err());
+        let body = HealthHandler::body();
+        assert_eq!(body.status, "ok", "the process still accepts requests");
+        assert_eq!(body.license.state, "unavailable");
+        assert_eq!(body.license.code, Some("license_temporarily_unavailable"));
+        assert_eq!(
+            body.license.message.as_deref(),
+            Some("temporary_failure: connection refused")
+        );
+        LicenseGate::clear_for_test();
     }
 
     #[tokio::test]

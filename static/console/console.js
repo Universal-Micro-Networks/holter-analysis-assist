@@ -7,12 +7,14 @@
 
   var healthStatus = document.getElementById("health-status");
   var healthLabel = document.getElementById("health-label");
+  var licenseBanner = document.getElementById("license-banner");
+  var licenseBannerBody = document.getElementById("license-banner-body");
   var eclInput = document.getElementById("ecl-file");
   var eclFilename = document.getElementById("ecl-filename");
   var formatSelect = document.getElementById("format-select");
   var analyzeBtn = document.getElementById("analyze-btn");
   var loadingEl = document.getElementById("loading");
-  var errorEl = document.getElementById("error");
+  var toastRegion = document.getElementById("toast-region");
   var resultEl = document.getElementById("result");
   var downloadBtn = document.getElementById("download-btn");
   var timingStatusEl = document.getElementById("timing-status");
@@ -102,13 +104,38 @@
   }
 
   function clearError() {
-    errorEl.textContent = "";
-    errorEl.hidden = true;
+    toastRegion.textContent = "";
   }
 
   function showError(message) {
-    errorEl.textContent = message;
-    errorEl.hidden = !message;
+    clearError();
+    if (!message) {
+      return;
+    }
+    var toast = document.createElement("div");
+    toast.className = "notification console-toast";
+    toast.setAttribute("role", "alert");
+
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "delete";
+    close.setAttribute("aria-label", "閉じる");
+    close.addEventListener("click", function () {
+      toast.remove();
+    });
+
+    var title = document.createElement("p");
+    title.className = "console-toast__title";
+    title.textContent = "エラー";
+
+    var body = document.createElement("p");
+    body.className = "console-toast__body";
+    body.textContent = message;
+
+    toast.appendChild(close);
+    toast.appendChild(title);
+    toast.appendChild(body);
+    toastRegion.appendChild(toast);
   }
 
   function hideDownload() {
@@ -168,6 +195,33 @@
     license_rate_limited:
       "ライセンスサーバーへの問い合わせが集中しているため、解析を実行できませんでした。しばらく待ってから、もう一度実行してください。",
   };
+
+  var LICENSE_BANNER_HINTS = {
+    license_temporarily_unavailable:
+      "ライセンスサーバーに接続できません。ネットワーク接続とライセンスサーバーの稼働状況を確認してください。",
+    license_inference_denied:
+      "ライセンスサーバーがこのライセンスを有効と認めませんでした。ライセンスの有効状態と設定されたライセンスキーを確認してください。",
+    license_rate_limited:
+      "ライセンスサーバーへの問い合わせが集中しています。しばらくお待ちください。",
+  };
+
+  var LICENSE_RECHECK_NOTE =
+    "サーバーが 30 秒ごとに自動で再確認し、確認できるとこの表示は消えます。";
+
+  /** Startup license state from /health; shows a persistent banner while unavailable. */
+  function updateLicenseBanner(license) {
+    if (!license || license.state !== "unavailable") {
+      licenseBanner.hidden = true;
+      licenseBannerBody.textContent = "";
+      return false;
+    }
+    var hint = LICENSE_BANNER_HINTS[license.code] || "ライセンスを確認できませんでした。";
+    var detail = [license.code, license.message].filter(Boolean).join(": ");
+    licenseBannerBody.textContent =
+      hint + LICENSE_RECHECK_NOTE + (detail ? "\n詳細: " + detail : "");
+    licenseBanner.hidden = false;
+    return true;
+  }
 
   function licenseErrorHint(text) {
     try {
@@ -240,13 +294,17 @@
       }
       var text = await res.text();
       var ok = false;
+      var data = null;
       try {
-        var data = JSON.parse(text);
+        data = JSON.parse(text);
         ok = data && data.status === "ok";
       } catch (e) {
         ok = false;
       }
-      if (ok) {
+      var licenseBlocked = ok && updateLicenseBanner(data.license);
+      if (licenseBlocked) {
+        setHealthState("error", "ライセンス未確認");
+      } else if (ok) {
         setHealthState("ok", "ヘルス正常");
       } else {
         setHealthState("error", "ヘルス応答異常");
@@ -307,7 +365,7 @@
           base = base + " " + hint;
           detail = detail ? "詳細: " + detail : "";
         }
-        showError(detail ? base + " " + detail : base);
+        showError(detail ? base + "\n" + detail : base);
         return;
       }
       var kind = guessKind(res.headers.get("content-type"), text);

@@ -1,6 +1,7 @@
 //! http-api listen / analyze integration (tasks 4.1 + 5.2).
 //!
-//! Covers: startup deny → no listen; startup ok → GET /health 200 (no meter);
+//! Covers: startup deny → listen with `/health` license warning and analyze
+//! refused without metering; startup ok → GET /health 200 (no meter);
 //! analyze success / invalid input / inference deny / oversized body; meter
 //! exactly once per analyze via the canonical entry (no HTTP-layer double meter).
 //! Revision (task 9.2): usage denial reasons map to 403 / 429 / 503 with a
@@ -19,7 +20,6 @@ use common::license_mock::{
     license_ini_section, LicenseMockServer, MockResponse, TEST_LICENSE_KEY,
 };
 use holter_analysis_assist::preprocess::EXPECTED_24H_SAMPLES_250;
-use predicates::prelude::*;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -241,44 +241,50 @@ fn wait_for_health(addr: &str, timeout: Duration) -> Result<(u16, Vec<u8>), Stri
 }
 
 #[test]
-fn startup_license_denied_exits_nonzero_and_does_not_listen() {
+fn startup_license_denied_serves_warning_and_refuses_analyze_without_metering() {
     let mock = LicenseMockServer::with_responses(
         MockResponse::error("license_invalid"),
         MockResponse::unlimited(),
     );
+    let (ecl_name, ecl_bytes) = synthetic_multi_window_ecl();
     let bind = free_bind_addr();
     let dir = TempDir::new().expect("tempdir");
-    let ini = write_merged_ini(&dir, &bind, mock.base_url());
+    let ini = write_synthetic_ecl_ini(&dir, &bind, mock.base_url());
+    let _child = spawn_ready(&ini, &bind);
 
-    let output = assert_cmd::Command::cargo_bin("holter-http-api")
-        .expect("holter-http-api binary")
-        .args(["--config", ini.to_str().unwrap()])
-        .output()
-        .expect("run");
-
+    let (status, body) = http_get(&bind, "/health").expect("health");
+    assert_eq!(status, 200, "body={}", String::from_utf8_lossy(&body));
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("health json");
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["license"]["state"], "unavailable", "{v}");
+    assert_eq!(v["license"]["code"], "license_inference_denied", "{v}");
     assert!(
-        !output.status.success(),
-        "startup deny must exit non-zero; stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        predicate::str::contains("startup failed")
-            .and(predicate::str::contains("license_invalid"))
-            .eval(&stderr),
-        "startup failure must be identifiable: {stderr}"
+        v["license"]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("license_invalid")),
+        "health must carry the startup failure reason: {v}"
     );
 
-    // Port must remain closed (no listen after deny).
-    assert!(
-        TcpStream::connect(&bind).is_err(),
-        "must not listen on {bind} when startup license check fails"
+    let req = multipart_analyze_request_with_fields(ecl_name, &ecl_bytes, &[("max_windows", "2")]);
+    let (status, body) =
+        http_exchange_timeout(&bind, &req, Duration::from_secs(60)).expect("analyze exchange");
+    assert_eq!(
+        status,
+        403,
+        "analyze must be refused until the startup check passes: body={}",
+        String::from_utf8_lossy(&body)
     );
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+    assert_eq!(v["error"]["code"], "license_inference_denied");
     assert!(
         mock.verify_hits() >= 1,
         "startup must have called license check"
     );
-    assert_eq!(mock.usage_hits(), 0, "startup path must not meter");
+    assert_eq!(
+        mock.usage_hits(),
+        0,
+        "refused analyze must not record usage"
+    );
 }
 
 #[test]

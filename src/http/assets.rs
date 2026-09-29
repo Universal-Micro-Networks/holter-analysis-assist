@@ -129,6 +129,49 @@ mod tests {
     }
 
     #[test]
+    fn console_shows_errors_as_top_right_toasts() {
+        let html = asset_text("index.html");
+        let css = asset_text("console.css");
+        let js = asset_text("console.js");
+        assert!(
+            html.contains("id=\"toast-region\"") && !html.contains("id=\"error\""),
+            "errors must go to the toast region, not an inline block under the button"
+        );
+        assert!(
+            css.contains(".console-toasts") && css.contains("position: fixed"),
+            "toast region must be fixed to the viewport"
+        );
+        assert!(
+            js.contains("role\", \"alert\"") && js.contains("閉じる"),
+            "each toast must be an alert with a Japanese close button"
+        );
+    }
+
+    #[test]
+    fn console_keeps_startup_license_failure_on_screen() {
+        let html = asset_text("index.html");
+        let js = asset_text("console.js");
+        assert!(
+            html.contains("id=\"license-banner\"") && html.contains("role=\"alert\""),
+            "startup license failure needs a persistent alert banner"
+        );
+        assert!(
+            js.contains("data.license") && js.contains("\"unavailable\""),
+            "banner must follow the license state reported by /health"
+        );
+        for code in [
+            "license_temporarily_unavailable",
+            "license_inference_denied",
+            "license_rate_limited",
+        ] {
+            assert!(
+                js.matches(&format!("{code}:")).count() >= 2,
+                "'{code}' needs both a toast hint and a banner hint"
+            );
+        }
+    }
+
+    #[test]
     fn embeds_vendored_bulma_with_license() {
         let css = asset_text("vendor/bulma.min.css");
         assert!(

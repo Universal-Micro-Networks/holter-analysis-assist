@@ -26,6 +26,11 @@
     </div>
   </header>
 
+  <div id="license-banner" class="console-license-banner" role="alert" hidden>
+    <p class="console-license-banner__title">ライセンスを確認できていないため、解析を実行できません</p>
+    <p id="license-banner-body" class="console-license-banner__body"></p>
+  </div>
+
   <main class="section console-main pt-4">
     <div class="container is-fluid">
       <p id="guidance" class="console-guidance mb-4">
@@ -77,8 +82,6 @@
             <p id="loading" class="help is-info console-loading" hidden aria-live="polite">
               処理中です。完了までお待ちください…
             </p>
-
-            <div id="error" class="notification is-danger is-light mt-3" role="alert" aria-live="assertive" hidden></div>
           </div>
         </div>
 
@@ -111,6 +114,8 @@
       </div>
     </div>
   </main>
+
+  <div id="toast-region" class="console-toasts" aria-live="assertive"></div>
 
   <script src="console.js"></script>
 </body>

@@ -206,7 +206,92 @@ body {
   color: var(--console-ink);
 }
 
+/* Startup license failure — stays visible until /health reports the license as ok */
+.console-license-banner {
+  margin: 1rem 1.5rem 0;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--console-bad) 40%, var(--console-line));
+  border-left: 6px solid var(--console-bad);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--console-bad) 7%, #fff);
+  color: var(--console-ink);
+  line-height: 1.65;
+}
+
+.console-license-banner__title {
+  margin: 0 0 0.25rem;
+  font-weight: 700;
+  color: var(--console-bad);
+}
+
+.console-license-banner__body {
+  margin: 0;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Error toasts — top right, below the sticky top bar; stay until closed or the next run */
+.console-toasts {
+  position: fixed;
+  top: 5.5rem;
+  right: 1.5rem;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: min(26rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.console-toast.notification {
+  margin: 0;
+  padding: 0.9rem 2.5rem 0.9rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--console-bad) 35%, var(--console-line));
+  border-left: 4px solid var(--console-bad);
+  background: #fff;
+  color: var(--console-ink);
+  box-shadow: 0 8px 24px rgba(28, 36, 48, 0.16);
+  line-height: 1.6;
+  font-size: 0.9rem;
+  pointer-events: auto;
+  animation: console-toast-in 0.18s ease-out;
+}
+
+.console-toast__title {
+  margin: 0 0 0.25rem;
+  font-weight: 700;
+  color: var(--console-bad);
+}
+
+.console-toast__body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@keyframes console-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-toast.notification {
+    animation: none;
+  }
+}
+
 @media screen and (max-width: 1023px) {
+  .console-toasts {
+    right: 1rem;
+  }
+
   .console-topbar {
     flex-wrap: wrap;
   }
